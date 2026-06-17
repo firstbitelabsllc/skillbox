@@ -6,9 +6,10 @@ A toolbox for your AI coding-agent skills. One `SKILL.md` folder works in **Clau
 
 ```bash
 git clone https://github.com/leojkwan/skillbox.git
-ln -s "$PWD/skillbox/bin/skillbox.py" ~/.local/bin/skillbox   # any dir on your $PATH
-cp skillbox/skills.toml.example ~/.skillbox/skills.toml       # then edit the paths
-skillbox doctor                                               # run from anywhere
+mkdir -p ~/.local/bin ~/.skillbox                            # create target dirs first
+ln -s "$PWD/skillbox/bin/skillbox.py" ~/.local/bin/skillbox  # ~/.local/bin must be on your $PATH
+cp skillbox/skills.toml.example ~/.skillbox/skills.toml      # then edit the [sources.*] paths
+skillbox doctor                                              # run from anywhere
 ```
 
 Pure Python 3 standard library — no dependencies. `tomllib` is used when available (3.11+) with a built-in fallback parser otherwise.

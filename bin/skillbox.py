@@ -247,8 +247,17 @@ def prune_dangling(roots, quiet=False):
             continue
         for link in sorted(root.iterdir()):
             if link.is_symlink() and not link.exists():
+                target = os.readlink(link)
+                # Only prune a genuinely-dead leaf (source dir present, skill folder
+                # gone). If the target's parent dir is absent the whole source just
+                # blinked out (unmounted / mid-move) — pruning then would silently
+                # unlink every skill of that source and report a false-clean fleet.
+                if not Path(target).parent.exists():
+                    if not quiet:
+                        print(f"keep {rname}/{link.name}: source absent, not pruned (transient)")
+                    continue
                 if not quiet:
-                    print(f"pruned {rname}/{link.name} (dangling -> {os.readlink(link)})")
+                    print(f"pruned {rname}/{link.name} (dangling -> {target})")
                 link.unlink()
                 cleaned += 1
     return cleaned
@@ -370,6 +379,9 @@ def cmd_promote(roots, sources, name, to_id):
     src, path = resolve(name, sources)
     if not src:
         sys.exit(f"not found: {name}")
+    if src.get("single_skill"):
+        sys.exit(f"'{name}' lives in single-skill source '{src['id']}' whose path IS the "
+                 "repo root — promote moves a skill folder, not a whole repo. Copy it manually.")
     tgt = next((s for s in sources if s["id"] == to_id), None)
     if not tgt:
         sys.exit(f"unknown --to {to_id}; known: {', '.join(s['id'] for s in sources)}")
@@ -623,6 +635,10 @@ def cmd_source_rm(name):
     end = start + 1
     while end < len(lines) and not lines[end].lstrip().startswith("["):
         end += 1
+    # Don't swallow blank/comment lines that head the NEXT table — they belong to it,
+    # not to the block being removed (else `source rm` silently eats a user's comments).
+    while end - 1 > start and (lines[end - 1].strip() == "" or lines[end - 1].lstrip().startswith("#")):
+        end -= 1
     if start > 0 and lines[start - 1].strip() == "":  # drop the separating blank line we added
         start -= 1
     del lines[start:end]
@@ -874,10 +890,12 @@ def render_page(roots, sources, state, token=""):
     if counts.get("unmanaged"):
         h.append(f'<a class="srcitem" data-src="unmanaged" href="#">unmanaged'
                  f'<span class="cnt">{counts["unmanaged"]}</span></a>')
-    h.append('<div class="seg">'
-             '<span class="opt active" data-show="installed">installed</span>'
-             '<span class="opt" data-show="available">available</span>'
-             '<span class="opt" data-show="all">all</span></div>')
+    # Default to "available" on a fresh fleet so the shelf isn't an empty "nothing
+    # here" wall when nothing is installed yet (the whole point is to install).
+    default_show = "installed" if installed else "available"
+    h.append('<div class="seg">' + "".join(
+        f'<span class="opt{" active" if s == default_show else ""}" data-show="{s}">{s}</span>'
+        for s in ("installed", "available", "all")) + '</div>')
     h.append(f'<form class="addsrc" method="post" action="/source-add">'
              f'<input type="text" name="id" placeholder="id (e.g. coworker)" autocomplete="off">'
              f'<input type="text" name="path" placeholder="~/path/to/their/skills" autocomplete="off">'
@@ -900,10 +918,11 @@ def render_page(roots, sources, state, token=""):
     h.append('<div id="nomatch" class="empty" style="display:none">nothing here — '
              'pick another source, or switch the filter to "available" / "all".</div>')
     h.append('</div></div>')  # close .main, .shell
+    h.append(f"<script>window.__sb_show={json.dumps(default_show)};</script>")
     h.append("""<script>
-(function(){var src='all',show='installed',flt='';
+(function(){var src='all',show=window.__sb_show||'installed',flt='';
 function apply(){var vis=0;document.querySelectorAll('details.row').forEach(function(d){
-var okName=d.dataset.name.indexOf(flt)>-1;
+var okName=d.dataset.name.toLowerCase().indexOf(flt)>-1;
 var okSrc=src==='all'||d.dataset.source===src;
 var okShow=show==='all'||(show==='installed')===(d.dataset.inst==='1');
 var ok=okName&&okSrc&&okShow;d.style.display=ok?'':'none';if(ok)vis++;});
@@ -1055,8 +1074,12 @@ def cmd_ui(roots, sources, port=8765, render_once=False):
             body = self.rfile.read(length).decode("utf-8", "replace") if length else ""
             q = {k: v[0] for k, v in parse_qs(body).items()}
             origin = self.headers.get("Origin")
-            same_origin = (not origin) or urlparse(origin).netloc == self.headers.get("Host", "")
-            if q.get("t") != token or not same_origin:  # CSRF wall
+            host = self.headers.get("Host", "")
+            same_origin = (not origin) or urlparse(origin).netloc == host
+            # Pin Host to loopback so a DNS-rebound page (its Host = attacker domain
+            # resolving to 127.0.0.1) cannot pass same-origin and mutate the fleet.
+            host_ok = host.split(":")[0] in ("127.0.0.1", "localhost")
+            if q.get("t") != token or not same_origin or not host_ok:  # CSRF + rebind wall
                 self.send_response(403)
                 self.end_headers()
                 self.wfile.write(b"forbidden (csrf)")
@@ -1080,12 +1103,19 @@ def main():
         print(__doc__)
         return
     if not MANIFEST.exists():
-        sys.exit(f"no manifest at {MANIFEST} — create it first")
+        sys.exit(f"no manifest at {MANIFEST}\n"
+                 f"create it:  mkdir -p {MANIFEST.parent} && cp skills.toml.example {MANIFEST}\n"
+                 "then edit the [sources.*] paths to point at your skill repos.")
     roots, sources = load()
     cmd = args[0]
 
     def opt(flag):
-        return args[args.index(flag) + 1] if flag in args else None
+        if flag not in args:
+            return None
+        i = args.index(flag) + 1
+        if i >= len(args) or args[i].startswith("--"):
+            sys.exit(f"{flag} needs a value")
+        return args[i]
 
     if cmd == "list":
         cmd_list(roots, sources)
@@ -1116,9 +1146,13 @@ def main():
         if "--render-about" in args:
             sys.stdout.buffer.write(render_about())
             return
-        cmd_ui(roots, sources, int(opt("--port") or 8765), render_once="--render" in args)
+        try:
+            port = int(opt("--port") or 8765)
+        except ValueError:
+            sys.exit("--port needs a number")
+        cmd_ui(roots, sources, port, render_once="--render" in args)
     else:
-        print(__doc__)
+        sys.exit(f"unknown or incomplete command: {' '.join(args)!r}\n{__doc__}")
 
 
 if __name__ == "__main__":

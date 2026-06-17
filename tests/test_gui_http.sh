@@ -62,6 +62,13 @@ sb_eq "cross-origin POST /add is forbidden (403)" "$xorigin_code" "403"
 sb_eq "cross-origin POST created NO symlink (alpha absent)" \
   "$([ -e "$SB_TMP/roots/claude/alpha" ] && echo present || echo gone)" "gone"
 
+# ── NEGATIVE: a DNS-rebound Host (matching Origin, but not loopback) → 403 ─────
+rebind_code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/add" \
+  --data "s=alpha&src=team&t=$TOKEN" -H "Host: evil.example:$PORT" -H "Origin: http://evil.example:$PORT")"
+sb_eq "rebound-Host POST /add is forbidden (403)" "$rebind_code" "403"
+sb_eq "rebound-Host POST created NO symlink (alpha absent)" \
+  "$([ -e "$SB_TMP/roots/claude/alpha" ] && echo present || echo gone)" "gone"
+
 # ── POSITIVE: same-origin POST /add with the token → 303 + real symlinks ──────
 add_code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/add" \
   --data "s=alpha&src=team&t=$TOKEN" -H "Origin: $BASE")"
