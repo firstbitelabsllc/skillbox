@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.playwright-cli/
+.DS_Store
+.claude/*
+!.claude/settings.json
+
+# Internal authoring artifacts — keep them out of the published repo.
+/PLAN.md
+/prompts/

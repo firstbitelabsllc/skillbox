@@ -1,0 +1,35 @@
+# skillbox manifest — copy to ~/.skillbox/skills.toml and adjust paths.
+# Priority: lower number wins name collisions (first-wins overlay; earlier wins).
+# Roots: one per agent runtime. Codex reads ~/.agents/skills (canonical);
+# ~/.codex/skills is kept only for Cursor-compat / legacy and is NOT scanned by Codex.
+
+[roots]
+claude = "~/.claude/skills"
+agents = "~/.agents/skills"
+cursor = "~/.cursor/skills"
+codex  = "~/.codex/skills"
+
+# A shared/team skills repo (highest precedence — wins name collisions).
+[sources.shared]
+path = "~/src/team-skills/skills"
+priority = 1
+
+# Your own skills repo. `skillbox new` lands here by default
+# (override the default id with $SKILLBOX_DEFAULT_SOURCE).
+[sources.personal]
+path = "~/src/my-skills/skills"
+priority = 2
+
+# A single-skill repo: the repo root IS one skill (a top-level SKILL.md).
+[sources.solo]
+path = "~/src/solo-skill"
+priority = 3
+single_skill = "solo"
+
+# A teammate's repo cloned locally, as a selective-pull source:
+# [sources.coworker]
+# path = "~/src/coworker-skills/skills"
+# priority = 50
+# Then:  skillbox add <one-skill> --source coworker   (mounts just that one skill)
+#
+# skillbox sources are LOCAL paths only — your repos and any repo already on disk.
