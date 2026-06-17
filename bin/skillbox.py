@@ -27,9 +27,12 @@ sharing verb. Codex reads ~/.agents/skills; ~/.codex/skills is Cursor-compat onl
 import os, sys, json, re, hashlib, subprocess
 from pathlib import Path
 try:
-    import tomllib
-except ModuleNotFoundError:  # macOS/system python can be <3.11; keep the CLI usable.
-    tomllib = None
+    import tomllib  # Python 3.11+ stdlib
+except ModuleNotFoundError:
+    try:
+        import tomli as tomllib  # older Python: `pip install tomli`
+    except ModuleNotFoundError:
+        tomllib = None
 
 # Config is overridable via $SKILLBOX_MANIFEST so the test harness can point at a
 # hermetic sandbox manifest (with fake roots + fake source repos) and never touch
@@ -65,70 +68,11 @@ def require_name(name):
     return name
 
 
-def _strip_toml_comment(s):
-    quote = ""
-    esc = False
-    out = []
-    for ch in s:
-        if quote:
-            out.append(ch)
-            if quote == '"' and ch == "\\" and not esc:
-                esc = True
-                continue
-            if ch == quote and not esc:
-                quote = ""
-            esc = False
-        elif ch in ("'", '"'):
-            quote = ch
-            out.append(ch)
-        elif ch == "#":
-            break
-        else:
-            out.append(ch)
-    return "".join(out).strip()
-
-
-def _parse_manifest_fallback(text):
-    """Tiny TOML subset for skillbox manifests when stdlib tomllib is unavailable.
-
-    Supports [roots], [sources.<id>], string values, and integer priorities. Full
-    TOML stays delegated to tomllib on Python 3.11+.
-    """
-    m, cur = {}, None
-    for lineno, raw in enumerate(text.splitlines(), 1):
-        line = _strip_toml_comment(raw)
-        if not line:
-            continue
-        if line.startswith("[") and line.endswith("]"):
-            parts = line[1:-1].split(".")
-            if len(parts) == 1:
-                cur = m.setdefault(parts[0], {})
-            elif len(parts) == 2 and parts[0] == "sources" and parts[1]:
-                cur = m.setdefault("sources", {}).setdefault(parts[1], {})
-            else:
-                raise ValueError(f"unsupported table on line {lineno}: {raw.strip()}")
-            continue
-        if cur is None or "=" not in line:
-            raise ValueError(f"expected key = value on line {lineno}: {raw.strip()}")
-        key, val = [p.strip() for p in line.split("=", 1)]
-        if not key:
-            raise ValueError(f"empty key on line {lineno}")
-        if val.startswith('"') and val.endswith('"'):
-            cur[key] = json.loads(val)
-        elif val.startswith("'") and val.endswith("'"):
-            cur[key] = val[1:-1]
-        elif re.match(r"^-?\d+$", val):
-            cur[key] = int(val)
-        else:
-            raise ValueError(f"unsupported value on line {lineno}: {raw.strip()}")
-    return m
-
-
 def _load_manifest():
-    text = MANIFEST.read_text(encoding="utf-8")
-    if tomllib:
-        return tomllib.loads(text)
-    return _parse_manifest_fallback(text)
+    if tomllib is None:
+        sys.exit("skillbox needs TOML support — use Python 3.11+ (stdlib tomllib) "
+                 "or `pip install tomli` on older Python.")
+    return tomllib.loads(MANIFEST.read_text(encoding="utf-8"))
 
 
 def _toml_string(s):
@@ -222,13 +166,15 @@ def link_one(roots, name, path, quiet=False):
         if dst.is_symlink():
             # normalize trailing slash on both sides (old captain sync.sh wrote
             # targets with a trailing slash; a raw compare would relink needlessly)
-            if os.readlink(dst).rstrip("/") == target.rstrip("/"):
+            cur = os.readlink(dst)
+            if cur.rstrip("/") == target.rstrip("/"):
                 continue
             dst.unlink()
             dst.symlink_to(path)
             relinked += 1
             if not quiet:
-                print(f"relinked {rname}/{name} -> {path}")
+                # show the replaced target — surfaces an adopted foreign/drifted link
+                print(f"relinked {rname}/{name}: replaced {cur} -> {path}")
         elif dst.exists():
             if not quiet:
                 print(f"skip {rname}/{name}: real file/dir present (not skillbox-owned)")

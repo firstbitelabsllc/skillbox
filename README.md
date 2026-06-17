@@ -12,7 +12,7 @@ cp skillbox/skills.toml.example ~/.skillbox/skills.toml      # then edit the [so
 skillbox doctor                                              # run from anywhere
 ```
 
-Pure Python 3 standard library — no dependencies. `tomllib` is used when available (3.11+) with a built-in fallback parser otherwise.
+Python 3.11+ (uses the stdlib `tomllib`); on older Python, `pip install tomli`. No other dependencies.
 
 ## Verbs
 

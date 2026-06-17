@@ -318,30 +318,14 @@ class SkillboxWorld(unittest.TestCase):
             with self.assertRaises(SystemExit, msg=f"{bad!r} must be rejected"):
                 sb.require_name(bad)
 
-    # ── manifest parser fallback (system python without tomllib) ───────────────
-    def test_load_manifest_fallback_without_tomllib(self):
+    # ── no TOML support (no tomllib AND no tomli) → clean exit, not a traceback ──
+    def test_load_without_toml_support_exits_clean(self):
         old_tomllib = sb.tomllib
         try:
-            quoted_source = self.tmp / 'quote"repo' / "skills"
-            quoted_source.mkdir(parents=True)
-            _write_skill(quoted_source, "quoted")
-            fallback_manifest = self.tmp / "fallback.toml"
-            fallback_manifest.write_text(
-                "[roots]\n"
-                f'claude = {sb._toml_string(self.roots["claude"])}\n'
-                f'agents = {sb._toml_string(self.roots["agents"])}\n'
-                f'cursor = {sb._toml_string(self.roots["cursor"])}\n'
-                f'codex = {sb._toml_string(self.roots["codex"])}\n'
-                "\n[sources.quoted]\n"
-                f"path = {sb._toml_string(quoted_source)}\n"
-                "priority = 12\n")
             sb.tomllib = None
-            sb.MANIFEST = fallback_manifest
-            roots, sources = sb.load()
-            self.assertEqual(roots["claude"], self.roots["claude"])
-            self.assertEqual(sources[0]["id"], "quoted")
-            self.assertEqual(sources[0]["path"], quoted_source)
-            self.assertEqual(sources[0]["priority"], 12)
+            with self.assertRaises(SystemExit) as cm:
+                sb.load()
+            self.assertIn("tomli", str(cm.exception))
         finally:
             sb.tomllib = old_tomllib
             sb.MANIFEST = self.manifest
