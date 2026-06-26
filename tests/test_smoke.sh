@@ -81,7 +81,18 @@ sb_eq "orphanx flagged UNMANAGED" \
   "$(printf '%s' "$um" | python3 -c 'import sys,json;print(sum(1 for p in json.load(sys.stdin)["problems"] if p["kind"]=="UNMANAGED" and p["where"]=="orphanx"))')" "1"
 sb_eq "UNMANAGED is non-blocking (doctor exits 0)" "$(sb_skillbox doctor >/dev/null 2>&1; echo $?)" "0"
 
-# 13. In-GUI About page: TL;DR + one-boundary diagram + the real repo link
+# 13. Dot-prefixed runtime helper symlinks are infrastructure, not skills.
+before_dot_count="$(printf '%s' "$um" | python3 -c 'import sys,json;print(json.load(sys.stdin)["skills_installed"])')"
+mkdir -p "$SB_TMP/system-helper"
+printf -- '---\nname: helper\ndescription: helper\n---\n' > "$SB_TMP/system-helper/SKILL.md"
+for r in claude agents cursor codex; do ln -s "$SB_TMP/system-helper" "$SB_TMP/roots/$r/.codex-system"; done
+dot_doc="$(sb_skillbox doctor --json)"
+sb_eq "dot helper is not counted as installed" \
+  "$(printf '%s' "$dot_doc" | python3 -c 'import sys,json;print(json.load(sys.stdin)["skills_installed"])')" "$before_dot_count"
+sb_eq "dot helper is not flagged unmanaged" \
+  "$(printf '%s' "$dot_doc" | python3 -c 'import sys,json;print(sum(1 for p in json.load(sys.stdin)["problems"] if p["where"]==".codex-system"))')" "0"
+
+# 14. In-GUI About page: TL;DR + one-boundary diagram + the real repo link
 about="$(sb_skillbox ui --render-about)"
 sb_contains "About: page titled how it works" "$about" "how it works"
 sb_contains "About: TL;DR names the SKILL.md unit" "$about" "SKILL.md"

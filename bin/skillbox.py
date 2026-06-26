@@ -430,7 +430,7 @@ def cmd_list(roots, sources):
     if not root.is_dir():
         sys.exit(f"primary root missing: {root}")
     for link in sorted(root.iterdir()):
-        if not link.is_symlink():
+        if not is_installed_skill_link(link):
             continue
         try:
             target = link.resolve()
@@ -446,6 +446,10 @@ def skill_md_hash(path):
         return None
 
 
+def is_installed_skill_link(path):
+    return path.is_symlink() and not path.name.startswith(".")
+
+
 def doctor_problems(roots, sources):
     """Return (problems, installed, collisions, parity). Pure — no printing."""
     plan, collisions = resolve_plan(sources)
@@ -456,7 +460,7 @@ def doctor_problems(roots, sources):
     installed = set()
     for root in roots.values():
         if root.is_dir():
-            installed |= {l.name for l in root.iterdir() if l.is_symlink()}
+            installed |= {l.name for l in root.iterdir() if is_installed_skill_link(l)}
     # Iterate installed ∪ plan winners: a winner blocked by a real file/dir in
     # EVERY root is symlinked nowhere (absent from `installed`) and would slip by
     # unreported. MISSING stays guarded on is_installed so an available-but-
@@ -493,7 +497,7 @@ def doctor_problems(roots, sources):
         hashes = {}
         for rname, root in roots.items():
             link = root / name
-            if link.is_symlink() and link.exists():
+            if is_installed_skill_link(link) and link.exists():
                 hashes[rname] = skill_md_hash(link)
         if len({h for h in hashes.values() if h}) > 1:
             problems.append(("PARITY", name, f"SKILL.md differs across runtimes: {hashes}"))
@@ -737,7 +741,7 @@ def render_page(roots, sources, state, token=""):
         return "~" + s[len(home):] if s.startswith(home) else s
 
     primary = next(iter(roots.values()))
-    installed = {l.name for l in primary.iterdir() if l.is_symlink()} if primary.is_dir() else set()
+    installed = {l.name for l in primary.iterdir() if is_installed_skill_link(l)} if primary.is_dir() else set()
     plan, collisions = resolve_plan(sources)
     problems, _, _, parity = doctor_problems(roots, sources)
     blocking = [(k, w, d) for (k, w, d) in problems
