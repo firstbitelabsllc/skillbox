@@ -23,6 +23,8 @@ skillbox add <name> [--source ID]   link an existing source skill into every run
 skillbox rm <name>                  remove a skill's symlinks (the source folder is untouched)
 skillbox promote <name> --to ID     move a skill to another source repo and relink (reversible)
 skillbox promote <name> --to org    publish to your org's plugin marketplace (prints a DRAFT PR; never sends)
+skillbox scrub [--dry-run] [--json]   list KEEP-PRIVATE / *-leo skills that would leak on promote
+skillbox scrub <name> --to ID         check one promote target; non-dry-run exits 1 if blocked
 skillbox source add <id> <path>     register a local source repo (e.g. a teammate's clone)
 skillbox diff <name> | log <name>   the skill folder's uncommitted diff / commit history
 skillbox doctor [--json]            check every mount across runtimes: BROKEN / MISSING / DRIFTED / SHADOWED
@@ -33,7 +35,7 @@ skillbox ui [--port N]              localhost management GUI at 127.0.0.1
 
 ## Where a skill lives = how it's shared
 
-skillbox never stores a "tier" flag and never copies a skill. A skill's reach is simply **which source repo holds the folder**, shown as the tag in each `list`/`doctor` row (e.g. `deploy  team`). `new` creates a skill in your own repo by default; `promote` is the one explicit command that moves a skill to a shared source and relinks it — reversible. `promote --to org` emits a Claude Code plugin manifest and prints the DRAFT marketplace PR for the repo in `$SKILLBOX_ORG_REPO`, which you review and fire yourself.
+skillbox never stores a "tier" flag and never copies a skill. A skill's reach is simply **which source repo holds the folder**, shown as the tag in each `list`/`doctor` row (e.g. `deploy  team`). `new` creates a skill in your own repo by default; `promote` is the one explicit command that moves a skill to a shared source and relinks it — reversible. `scrub` audits private-boundary skills (`KEEP-PRIVATE`, `*-leo`, `.keep-private`) and blocks `promote` when a move would leak them. `promote --to org` emits a Claude Code plugin manifest and prints the DRAFT marketplace PR for the repo in `$SKILLBOX_ORG_REPO`, which you review and fire yourself.
 
 Sources resolve in priority order; the first to define a name wins (a suffix like `-mine` lets you keep your own version of a shared skill). Run `skillbox doctor` any time to confirm every runtime is mounted consistently.
 
