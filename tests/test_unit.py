@@ -348,6 +348,26 @@ class SkillboxWorld(unittest.TestCase):
         self.assertEqual(
             sb.owner_of(self.tmp / "nowhere", self.sources, plan, "ghost"), "?(unmanaged)")
 
+    # ── scrub / private-boundary guards ─────────────────────────────────────
+    def test_skill_private_boundary_leo_suffix(self):
+        d = _write_skill(self.priv_dir, "pilot-leo", "overlay")
+        self.assertEqual(sb.skill_private_boundary(d, "pilot-leo"), ["leo-overlay suffix"])
+
+    def test_skill_private_boundary_keep_private_marker(self):
+        d = _write_skill(self.priv_dir, "vault", "vault", "KEEP-PRIVATE\n")
+        self.assertEqual(sb.skill_private_boundary(d, "vault"), ["KEEP-PRIVATE marker"])
+
+    def test_skill_private_boundary_clean(self):
+        d = _write_skill(self.priv_dir, "gamma", "gamma")
+        self.assertEqual(sb.skill_private_boundary(d, "gamma"), [])
+
+    def test_scrub_would_leak_blocks_shared_promote_only(self):
+        d = _write_skill(self.priv_dir, "pilot-leo", "overlay")
+        self.assertTrue(sb.scrub_would_leak("pilot-leo", d, "team", "private"))
+        self.assertFalse(sb.scrub_would_leak("pilot-leo", d, "private", "private"))
+        g = _write_skill(self.priv_dir, "gamma", "gamma")
+        self.assertFalse(sb.scrub_would_leak("gamma", g, "team", "private"))
+
 
 if __name__ == "__main__":
     # clean up the boot dir on the way out (best-effort)
