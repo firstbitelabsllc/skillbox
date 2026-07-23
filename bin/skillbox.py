@@ -161,6 +161,8 @@ def link_one(roots, name, path, quiet=False):
     target = str(path)
     for rname, root in roots.items():
         if not root.is_dir():
+            if not quiet:
+                print(f"skip {rname}/{name}: runtime root missing ({root}) — mkdir it or remove it from [roots]")
             continue
         dst = root / name
         if dst.is_symlink():
