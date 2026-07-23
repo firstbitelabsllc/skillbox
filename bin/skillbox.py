@@ -14,6 +14,7 @@ Commands:
   skillbox diff <name>               the skill's uncommitted git diff (if its source repo has a .git)
   skillbox log <name>                the skill's commit history (recent versions of the folder)
   skillbox doctor [--json]           drift/parity check across runtimes: BROKEN/MISSING/DRIFTED/SHADOWED
+  skillbox scrub [<name>] [--to ID] [--dry-run]  audit private boundaries (KEEP-PRIVATE / *-leo); block promote leaks
   skillbox sync [--no-pull]          git pull each source + relink winners + prune dead links
   skillbox update [--dry-run]        git pull each source; show SKILL.md diffs first
   skillbox ui [--port N] [--render]  localhost management GUI (127.0.0.1); --render prints one page and exits
@@ -58,6 +59,10 @@ ORG_REPO = os.environ.get("SKILLBOX_ORG_REPO", "")
 # escapes via "/", "..", or an absolute path (Path("/src") / "/etc/x" == "/etc/x").
 # Shape mirrors the marketplace's kebab-case plugin names; the guard is the security wall.
 _VALID_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+# Private-boundary markers: skills carrying these must never promote to shared/org targets.
+_KEEP_PRIVATE_RE = re.compile(
+    r"KEEP[- ]PRIVATE|keep-private\s*:\s*true|visibility\s*:\s*private", re.I)
 
 
 def require_name(name):
@@ -269,6 +274,99 @@ def _git_author(path):
     return cfg("user.name"), cfg("user.email")
 
 
+def skill_private_boundary(path, name):
+    """Return human-readable reasons if this skill must stay private (empty = promotable)."""
+    reasons = []
+    if name.endswith("-leo"):
+        reasons.append("leo-overlay suffix")
+    if (path / ".keep-private").exists():
+        reasons.append(".keep-private file")
+    try:
+        if _KEEP_PRIVATE_RE.search((path / "SKILL.md").read_text(errors="replace")):
+            reasons.append("KEEP-PRIVATE marker")
+    except OSError:
+        pass
+    return reasons
+
+
+def skill_leak_paths(path):
+    """All paths under a skill folder that would move on promote."""
+    if not path.is_dir():
+        return [str(path)]
+    return sorted(str(p) for p in path.rglob("*") if p.is_file()) + [str(path)]
+
+
+def scrub_findings(sources, name=None, to_id=None):
+    """Return [{name, from_id, to_id, path, reasons, paths}] for would-leak promotes."""
+    findings = []
+    if name:
+        name = require_name(name)
+        src, path = resolve(name, sources)
+        if not src:
+            sys.exit(f"not found: {name}")
+        reasons = skill_private_boundary(path, name)
+        if not reasons:
+            return []
+        if to_id and to_id != "org" and to_id == src["id"]:
+            return []  # no-op promote to same source
+        findings.append({
+            "name": name, "from_id": src["id"], "to_id": to_id or "(any shared)",
+            "path": path, "reasons": reasons, "paths": skill_leak_paths(path),
+        })
+        return findings
+    for src in sources:
+        for skill_name, path in source_skills(src).items():
+            reasons = skill_private_boundary(path, skill_name)
+            if reasons:
+                findings.append({
+                    "name": skill_name, "from_id": src["id"],
+                    "to_id": to_id or "(any shared)", "path": path,
+                    "reasons": reasons, "paths": skill_leak_paths(path),
+                })
+    return findings
+
+
+def scrub_would_leak(name, path, to_id, from_id):
+    """True when promote <name> from from_id -> to_id would ship a private boundary."""
+    reasons = skill_private_boundary(path, name)
+    if not reasons:
+        return False
+    if to_id == from_id:
+        return False
+    return True
+
+
+def cmd_scrub(sources, name=None, to_id=None, dry_run=False, as_json=False):
+    """Audit KEEP-PRIVATE / *-leo overlays. Dry-run lists would-leak paths; else exit 1."""
+    findings = scrub_findings(sources, name, to_id)
+    if as_json:
+        print(json.dumps([{
+            "name": f["name"], "from": f["from_id"], "to": f["to_id"],
+            "reasons": f["reasons"], "paths": f["paths"],
+        } for f in findings], indent=2))
+    else:
+        if not findings:
+            print("scrub: clean (no private-boundary skills would leak on promote)")
+        for f in findings:
+            why = ", ".join(f["reasons"])
+            target = f" -> {f['to_id']}" if f["to_id"] else ""
+            print(f"WOULD-LEAK {f['name']}  {f['from_id']}{target}  ({why})")
+            for p in f["paths"]:
+                print(f"  {p}")
+        if findings:
+            print(f"scrub: {len(findings)} private-boundary skill(s) — promote blocked")
+    if dry_run or not findings:
+        return 0
+    return 1
+
+
+def _scrub_guard_promote(name, path, from_id, to_id):
+    if scrub_would_leak(name, path, to_id, from_id):
+        reasons = ", ".join(skill_private_boundary(path, name))
+        sys.exit(f"promote blocked: {name} is a private boundary ({reasons}). "
+                 f"Run `skillbox scrub {name} --to {to_id} --dry-run` to list paths.")
+
+
 def cmd_promote_org(sources, name):
     """Org-tier publish OFF-RAMP (not a folder move): emit a Claude-Code plugin
     manifest into the skill's own folder and print the marketplace registration
@@ -280,6 +378,7 @@ def cmd_promote_org(sources, name):
     src, path = resolve(name, sources)
     if not src:
         sys.exit(f"not found: {name}")
+    _scrub_guard_promote(name, path, src["id"], "org")
     desc = skill_description(path) or f"TODO — one-line description of {name}"
     cp = path / ".claude-plugin"
     cp.mkdir(exist_ok=True)
@@ -340,6 +439,7 @@ def cmd_promote(roots, sources, name, to_id):
     new_path = tgt["path"] / name
     if new_path.exists():
         sys.exit(f"cannot promote: {new_path} already exists")
+    _scrub_guard_promote(name, path, src["id"], to_id)
     import shutil
     new_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(path), str(new_path))
@@ -1088,6 +1188,14 @@ def main():
         cmd_diff(sources, args[1])
     elif cmd == "log" and len(args) >= 2:
         cmd_log(sources, args[1])
+    elif cmd == "scrub":
+        scrub_name = args[1] if len(args) >= 2 and not args[1].startswith("--") else None
+        sys.exit(cmd_scrub(sources, scrub_name, opt("--to"), dry_run="--dry-run" in args,
+                           as_json="--json" in args))
+    elif cmd == "doctor" and len(args) >= 2 and args[1] == "scrub":
+        scrub_name = args[2] if len(args) >= 3 and not args[2].startswith("--") else None
+        sys.exit(cmd_scrub(sources, scrub_name, opt("--to"), dry_run="--dry-run" in args,
+                           as_json="--json" in args))
     elif cmd in ("doctor", "audit"):
         sys.exit(cmd_doctor(roots, sources, as_json="--json" in args))
     elif cmd == "sync":
