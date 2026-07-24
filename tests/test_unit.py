@@ -368,6 +368,22 @@ class SkillboxWorld(unittest.TestCase):
         g = _write_skill(self.priv_dir, "gamma", "gamma")
         self.assertFalse(sb.scrub_would_leak("gamma", g, "team", "private"))
 
+    def test_other_skillbox_on_path_ignores_self_and_finds_peer(self):
+        fake = self.tmp / "fakebin"
+        fake.mkdir()
+        peer = fake / "skillbox"
+        peer.write_text("#!/bin/sh\necho fake\n")
+        peer.chmod(0o755)
+        me = Path(sb.__file__).resolve()
+        found = sb.other_skillbox_on_path(path_env=str(fake), me=me)
+        self.assertEqual(found, [str(peer)])
+        # symlink to this script is not a peer
+        real = self.tmp / "realbin"
+        real.mkdir()
+        link = real / "skillbox"
+        link.symlink_to(me)
+        self.assertEqual(sb.other_skillbox_on_path(path_env=str(real), me=me), [])
+
 
 if __name__ == "__main__":
     # clean up the boot dir on the way out (best-effort)

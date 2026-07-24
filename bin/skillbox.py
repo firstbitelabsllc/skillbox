@@ -13,7 +13,7 @@ Commands:
   skillbox source add <id> <path>    add a local source repo (e.g. a teammate's clone); `source rm <id>` reverses
   skillbox diff <name>               the skill's uncommitted git diff (if its source repo has a .git)
   skillbox log <name>                the skill's commit history (recent versions of the folder)
-  skillbox doctor [--json]           drift/parity check across runtimes: BROKEN/MISSING/DRIFTED/SHADOWED
+  skillbox doctor [--json]           drift/parity check across runtimes: BROKEN/MISSING/DRIFTED/SHADOWED/PATH-SHADOW
   skillbox scrub [<name>] [--to ID] [--dry-run]  audit private boundaries (KEEP-PRIVATE / *-leo); block promote leaks
   skillbox sync [--no-pull]          git pull each source + relink winners + prune dead links
   skillbox update [--dry-run]        git pull each source; show SKILL.md diffs first
@@ -552,6 +552,37 @@ def is_installed_skill_link(path):
     return path.is_symlink() and not path.name.startswith(".")
 
 
+def other_skillbox_on_path(path_env=None, me=None):
+    """Return PATH entries named `skillbox` that are not this script.
+
+    Non-blocking doctor signal for the npm/Homebrew name collision: another
+    CLI also called skillbox (no doctor/scrub) can win when PATH order is wrong.
+    """
+    me = (me or Path(__file__)).resolve()
+    found = []
+    seen = set()
+    for d in (path_env if path_env is not None else os.environ.get("PATH", "")).split(os.pathsep):
+        if not d:
+            continue
+        cand = Path(d) / "skillbox"
+        try:
+            if not (cand.is_file() or cand.is_symlink()):
+                continue
+            if not os.access(cand, os.X_OK):
+                continue
+            resolved = cand.resolve()
+            if resolved == me:
+                continue
+            key = str(resolved)
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append(str(cand))
+        except OSError:
+            continue
+    return found
+
+
 def doctor_problems(roots, sources):
     """Return (problems, installed, collisions, parity). Pure — no printing."""
     plan, collisions = resolve_plan(sources)
@@ -609,7 +640,14 @@ def doctor_problems(roots, sources):
 
 def cmd_doctor(roots, sources, as_json=False):
     problems, installed, collisions, parity = doctor_problems(roots, sources)
+    for peer in other_skillbox_on_path():
+        problems.append((
+            "PATH-SHADOW", "skillbox",
+            f"another skillbox on PATH: {peer} — put this tool's dir first "
+            f"(npm/Homebrew name collision)",
+        ))
     blocking = [p for p in problems if p[0] in ("BROKEN", "MISSING", "DRIFTED", "MISSING-ROOT", "PARITY", "OCCUPIED")]
+    path_shadows = [p for p in problems if p[0] == "PATH-SHADOW"]
     if as_json:
         print(json.dumps({
             "roots": {k: str(v) for k, v in roots.items()},
@@ -621,10 +659,15 @@ def cmd_doctor(roots, sources, as_json=False):
     else:
         for kind, where, detail in problems:
             print(f"{kind:12} {where}  {detail}")
+        extra = ""
+        if collisions:
+            extra += f"; {len(collisions)} shadow(s)"
+        if path_shadows:
+            extra += f"; {len(path_shadows)} PATH-SHADOW(s)"
         print(f"doctor: {len(blocking)} blocking problem(s)" if blocking
               else f"doctor: clean ({len(installed)} skills across "
                    f"{sum(1 for r in roots.values() if r.is_dir())} runtimes)"
-                   + (f"; {len(collisions)} shadow(s)" if collisions else ""))
+                   + extra)
     return 1 if blocking else 0
 
 

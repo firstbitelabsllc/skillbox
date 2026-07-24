@@ -35,7 +35,7 @@ skillbox scrub [--dry-run] [--json]   list KEEP-PRIVATE / *-leo skills that woul
 skillbox scrub <name> --to ID         check one promote target; non-dry-run exits 1 if blocked
 skillbox source add <id> <path>     register a local source repo (e.g. a teammate's clone)
 skillbox diff <name> | log <name>   the skill folder's uncommitted diff / commit history
-skillbox doctor [--json]            check every mount across runtimes: BROKEN / MISSING / DRIFTED / SHADOWED
+skillbox doctor [--json]            check every mount across runtimes: BROKEN / MISSING / DRIFTED / SHADOWED / PATH-SHADOW
 skillbox sync [--no-pull]           git pull each source, relink, and prune dead links
 skillbox update [--dry-run]         git pull each source; show SKILL.md diffs first
 skillbox ui [--port N]              localhost management GUI at 127.0.0.1
