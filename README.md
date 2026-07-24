@@ -7,12 +7,20 @@ A toolbox for your AI coding-agent skills. One `SKILL.md` folder works in **Clau
 ```bash
 git clone https://github.com/leojkwan/skillbox.git
 mkdir -p ~/.local/bin ~/.skillbox                            # create target dirs first
-ln -s "$PWD/skillbox/bin/skillbox.py" ~/.local/bin/skillbox  # ~/.local/bin must be on your $PATH
-cp skillbox/skills.toml.example ~/.skillbox/skills.toml      # then edit the [sources.*] paths
-skillbox doctor                                              # run from anywhere
+ln -s "$PWD/skillbox/bin/skillbox.py" ~/.local/bin/skillbox
+# ~/.local/bin must be *before* Homebrew/npm bins on $PATH — an unrelated
+# npm package also named `skillbox` ships `doctor`-less commands.
+export PATH="$HOME/.local/bin:$PATH"
+cp skillbox/skills.toml.example ~/.skillbox/skills.toml      # keep [roots]; edit [sources.*] paths
+command -v skillbox   # should resolve to .../skillbox.py
+skillbox doctor       # run from anywhere
 ```
 
 Python 3.11+ (uses the stdlib `tomllib`); on older Python, `pip install tomli`. No other dependencies.
+
+If `skillbox doctor` says `unknown command 'doctor'`, you are hitting the npm
+CLI (`christiananagnostou/skillbox`), not this tool — fix `$PATH` order (or
+unlink the Homebrew/npm binary) and re-check with `command -v skillbox`.
 
 ## Verbs
 
