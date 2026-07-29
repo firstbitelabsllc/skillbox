@@ -5,10 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Versions below describe the product surface intended for a **1.0.0** cut.
-**No GitHub Release or published tag for 1.0.0 is claimed here yet.**
-
-## [1.0.0] — unreleased
+## [1.0.0] — 2026-07-29
 
 ### Added
 
