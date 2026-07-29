@@ -1197,12 +1197,50 @@ def main():
     if not args:
         print(__doc__)
         return
+
+    # Validate command flags before loading the manifest or dispatching any
+    # command.  The hand-rolled dispatcher otherwise treats stray flags as
+    # inert positional text: `skillbox sync --help` used to run a real sync.
+    command_flags = {
+        "list": set(),
+        "new": {"--repo"},
+        "add": {"--source"},
+        "rm": set(),
+        "promote": {"--to"},
+        "diff": set(),
+        "log": set(),
+        "scrub": {"--to", "--dry-run", "--json"},
+        "audit": {"--json"},
+        "sync": {"--no-pull"},
+        "update": {"--dry-run"},
+        "ui": {"--port", "--render", "--render-about"},
+    }
+    cmd = args[0]
+    if cmd == "source":
+        allowed_flags = {"--priority"} if args[1:2] == ["add"] else set()
+    elif cmd == "doctor":
+        allowed_flags = ({"--to", "--dry-run", "--json"}
+                         if args[1:2] == ["scrub"] else {"--json"})
+    elif cmd in command_flags:
+        allowed_flags = command_flags[cmd]
+    else:
+        sys.exit(f"unknown or incomplete command: {' '.join(args)!r}\n{__doc__}")
+
+    unknown_flags = [
+        arg for arg in args[1:]
+        if arg.startswith("-") and arg not in allowed_flags and arg not in ("-h", "--help")
+    ]
+    if unknown_flags:
+        sys.exit(f"unknown option for {cmd}: {unknown_flags[0]}")
+    if "-h" in args or "--help" in args:
+        print(__doc__)
+        return
+
     if not MANIFEST.exists():
         sys.exit(f"no manifest at {MANIFEST}\n"
                  f"create it:  mkdir -p {MANIFEST.parent} && cp skills.toml.example {MANIFEST}\n"
                  "then edit the [sources.*] paths to point at your skill repos.")
     roots, sources = load()
-    cmd = args[0]
 
     def opt(flag):
         if flag not in args:
