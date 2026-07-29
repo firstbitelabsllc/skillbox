@@ -7,7 +7,7 @@ Commands:
   skillbox list                      installed skills with their resolved source
   skillbox new <name> [--repo ID]    scaffold a new skill (default: your own repo) and link it everywhere
   skillbox add <name> [--source ID]  symlink an existing source skill into every runtime root
-  skillbox rm <name>                 remove the skill's symlinks (source folder untouched)
+  skillbox rm <name>                 unlink named runtime-slot symlinks (source folder untouched)
   skillbox promote <name> --to ID    move the skill to another source repo (reversible) and relink
   skillbox promote <name> --to org   emit a plugin manifest + print the DRAFT marketplace PR (never sends)
   skillbox source add <id> <path>    add a local source repo (e.g. a teammate's clone); `source rm <id>` reverses
@@ -15,8 +15,8 @@ Commands:
   skillbox log <name>                the skill's commit history (recent versions of the folder)
   skillbox doctor [--json]           drift/parity check across runtimes: BROKEN/MISSING/DRIFTED/SHADOWED/PATH-SHADOW
   skillbox scrub [<name>] [--to ID] [--dry-run]  audit private boundaries (KEEP-PRIVATE / *-leo); block promote leaks
-  skillbox sync [--no-pull]          git pull each source + relink winners + prune dead links
-  skillbox update [--dry-run]        git pull each source; show SKILL.md diffs first
+  skillbox sync [--no-pull]          pull Git sources unless --no-pull; relink winners + prune
+  skillbox update [--dry-run]        pull Git sources, or fetch-only preview with --dry-run
   skillbox ui [--port N] [--render]  localhost management GUI (127.0.0.1); --render prints one page and exits
 
 Manifest: ~/.skillbox/skills.toml  (override with $SKILLBOX_MANIFEST for tests).
@@ -35,6 +35,9 @@ except ModuleNotFoundError:
     except ModuleNotFoundError:
         tomllib = None
 
+# Single source of truth for the public release identity (`skillbox --version`).
+VERSION = "1.0.0"
+
 # Config is overridable via $SKILLBOX_MANIFEST so the test harness can point at a
 # hermetic sandbox manifest (with fake roots + fake source repos) and never touch
 # the real fleet. The sources clone dir derives from its parent.
@@ -47,7 +50,9 @@ CONFIG_DIR = MANIFEST.parent
 DEFAULT_NEW_SOURCE = os.environ.get("SKILLBOX_DEFAULT_SOURCE", "personal")
 
 # This project's home, shown on the GUI About page (override via $SKILLBOX_REPO_URL).
-REPO_URL = os.environ.get("SKILLBOX_REPO_URL", "https://github.com/leojkwan/skillbox")
+REPO_URL = os.environ.get(
+    "SKILLBOX_REPO_URL", "https://github.com/firstbitelabsllc/skillbox"
+)
 
 # Optional org plugin marketplace for `promote --to org` (the Claude Code plugin
 # marketplace convention). Set $SKILLBOX_ORG_REPO to your "owner/repo"; unset
@@ -161,7 +166,7 @@ def git_root(path):
 
 def link_one(roots, name, path, quiet=False):
     """Idempotently symlink name -> absolute source path into every root.
-    Relinks a drifted skillbox-owned link; refuses to clobber a real file/dir."""
+    Replaces any differing symlink in the configured slot; refuses real files/dirs."""
     linked = relinked = 0
     target = str(path)
     for rname, root in roots.items():
@@ -184,7 +189,7 @@ def link_one(roots, name, path, quiet=False):
                 print(f"relinked {rname}/{name}: replaced {cur} -> {path}")
         elif dst.exists():
             if not quiet:
-                print(f"skip {rname}/{name}: real file/dir present (not skillbox-owned)")
+                print(f"skip {rname}/{name}: real file/dir present (symlinks only are replaceable)")
         else:
             dst.symlink_to(path)
             linked += 1
@@ -193,7 +198,25 @@ def link_one(roots, name, path, quiet=False):
     return linked, relinked
 
 
-def prune_dangling(roots, quiet=False):
+def _target_in_sources(link, target, sources):
+    """Return whether a link target is inside one of the configured sources."""
+    candidate = Path(target)
+    if not candidate.is_absolute():
+        candidate = link.parent / candidate
+    try:
+        candidate = candidate.resolve(strict=False)
+    except OSError:
+        return False
+    for src in sources:
+        try:
+            candidate.relative_to(src["path"].resolve(strict=False))
+            return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
+def prune_dangling(roots, sources, quiet=False):
     cleaned = 0
     for rname, root in roots.items():
         if not root.is_dir():
@@ -201,6 +224,13 @@ def prune_dangling(roots, quiet=False):
         for link in sorted(root.iterdir()):
             if link.is_symlink() and not link.exists():
                 target = os.readlink(link)
+                # Runtime roots are shared with other tools. Never unlink an
+                # unknown dangling symlink just because it happens to live
+                # beside Skillbox mounts.
+                if not _target_in_sources(link, target, sources):
+                    if not quiet:
+                        print(f"keep {rname}/{link.name}: target is outside configured sources")
+                    continue
                 # Only prune a genuinely-dead leaf (source dir present, skill folder
                 # gone). If the target's parent dir is absent the whole source just
                 # blinked out (unmounted / mid-move) — pruning then would silently
@@ -446,7 +476,7 @@ def cmd_promote(roots, sources, name, to_id):
     print(f"promoted {name}: {src['id']} -> {to_id}")
     _, npath = resolve(name, sources)  # re-resolve winner (precedence may re-pick)
     link_one(roots, name, npath or new_path, quiet=True)
-    prune_dangling(roots, quiet=True)
+    prune_dangling(roots, sources, quiet=True)
     print(f"relinked {name} -> {npath or new_path}")
     print(f"reverse with: skillbox promote {name} --to {src['id']}")
     print("commit the move in each affected source repo when ready (skillbox does not auto-commit).")
@@ -472,7 +502,7 @@ def cmd_rm(roots, skill):
             print(f"unlinked {rname}/{skill}")
             n += 1
     if not n:
-        print(f"{skill}: no skillbox-owned symlinks found")
+        print(f"{skill}: no symlinks found in configured runtime slots")
 
 
 def cmd_update(sources, dry):
@@ -506,7 +536,7 @@ def cmd_sync(roots, sources, no_pull=False):
         l, r = link_one(roots, name, path, quiet=True)
         linked += l
         relinked += r
-    cleaned = prune_dangling(roots, quiet=True)
+    cleaned = prune_dangling(roots, sources, quiet=True)
     print(f"sync: {len(plan)} skills resolved · linked={linked} relinked={relinked} pruned={cleaned}")
 
 
@@ -613,7 +643,7 @@ def doctor_problems(roots, sources):
                 if link.exists():
                     if winner:  # a real file blocks a skill that SHOULD mount → blocking
                         problems.append(("OCCUPIED", f"{rname}/{name}",
-                                         "real file/dir blocks the mount (not skillbox-owned)"))
+                                         "real file/dir blocks the mount (symlinks only are replaceable)"))
                 elif winner and is_installed:
                     problems.append(("MISSING", f"{rname}/{name}",
                                      f"-> {winner[0]['id']} (present in other runtimes)"))
@@ -1196,6 +1226,10 @@ def main():
     args = sys.argv[1:]
     if not args:
         print(__doc__)
+        return
+    # Version is identity-only: no manifest, no home config, no fleet touch.
+    if args[0] == "--version":
+        print(f"skillbox {VERSION}")
         return
     if not MANIFEST.exists():
         sys.exit(f"no manifest at {MANIFEST}\n"

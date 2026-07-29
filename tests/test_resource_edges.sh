@@ -102,12 +102,12 @@ sb_contains "(c) add reports not-found for the non-skill dir" "$SB_OUT" "not fou
 
 # ── (d) a real file in a skill-name slot is left untouched (refuse-to-clobber) ─
 # Park a REAL regular file at claude/alpha. `alpha` is a genuine team skill, so add/sync
-# will try to mount it everywhere — except this slot, which is not skillbox-owned.
-# Earlier sections ran sync, so claude/alpha is currently a skillbox symlink; remove it
+# will try to mount it everywhere — except this slot, which is a real file.
+# Earlier sections ran sync, so claude/alpha is currently a configured-slot symlink; remove it
 # first (otherwise a `>` redirect would follow the link into the source dir) and replace
 # it with a genuine regular file that skillbox must treat as foreign.
 REALFILE_BODY="i am a real user file, not a skillbox symlink $$"
-rm -f "$SB_TMP/roots/claude/alpha"   # drop the skillbox-owned symlink left by prior sync
+rm -f "$SB_TMP/roots/claude/alpha"   # drop the configured-slot symlink left by prior sync
 printf '%s\n' "$REALFILE_BODY" > "$SB_TMP/roots/claude/alpha"
 # Sanity: the slot is now a real regular file, not a symlink, before we test refusal.
 [ -f "$SB_TMP/roots/claude/alpha" ] && [ ! -L "$SB_TMP/roots/claude/alpha" ] \

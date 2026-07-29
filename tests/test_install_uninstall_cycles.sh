@@ -8,8 +8,8 @@
 #    everywhere" and exits 0 (no error, no extra links).
 #  - sync FULL merge: every resolved source skill becomes a real symlink in EVERY one
 #    of the 4 roots; per-root link count == number of resolved skills.
-#  - rm only removes skillbox-owned symlinks: a real (non-symlink) file in a root is
-#    left untouched, and both add and rm REFUSE to clobber it.
+#  - rm unlinks symlinks in configured slots regardless of provenance: a real
+#    (non-symlink) file in a root is left untouched by both add and rm.
 #
 # Every assertion can fail if skillbox regresses (real targets, real exit codes,
 # negative paths). NEVER touches the real fleet — sandbox-only via SKILLBOX_MANIFEST.
@@ -63,8 +63,8 @@ sb_ok "source beta/SKILL.md still present" test -f "$SRC_BETA/SKILL.md"
 # rm when nothing is mounted: graceful message, exit 0.
 RM_ABSENT="$(sb_skillbox rm beta 2>&1)"
 sb_ok "rm beta (already absent) exits 0" sb_skillbox rm beta
-sb_contains "rm beta absent → 'no skillbox-owned symlinks'" \
-  "$RM_ABSENT" "no skillbox-owned symlinks"
+sb_contains "rm beta absent → no symlinks in configured slots" \
+  "$RM_ABSENT" "no symlinks found in configured runtime slots"
 
 # ── 2. add idempotency ─────────────────────────────────────────────────────────
 sb_ok "add alpha (first) exits 0" sb_skillbox add alpha
@@ -168,7 +168,7 @@ for r in agents cursor codex; do
   fi
 done
 # rm output should not claim it removed the claude one (only the symlink roots).
-sb_contains "rm unlinked agents/alpha (symlink-owned only)" "$RM_OUT" "unlinked agents/alpha"
+sb_contains "rm unlinked agents/alpha (symlink slot only)" "$RM_OUT" "unlinked agents/alpha"
 case "$RM_OUT" in
   *"unlinked claude/alpha"*) _sb_fail "rm must NOT report unlinking the real claude/alpha";;
   *) _sb_pass "rm did not report unlinking real claude/alpha";;

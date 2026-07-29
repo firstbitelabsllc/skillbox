@@ -54,6 +54,7 @@ done
 sb_eq "teammate skill source untouched" "$( [ -f "$COWORKER/skills/toolx/SKILL.md" ] && echo yes )" "yes"
 
 # NEGATIVE: rm of a never-installed name is a no-op (exits 0).
-sb_contains "rm of unknown skill is a no-op" "$(sb_skillbox rm neverwas)" "no skillbox-owned symlinks found"
+sb_contains "rm of unknown skill is a no-op" \
+  "$(sb_skillbox rm neverwas)" "no symlinks found in configured runtime slots"
 
 sb_report

@@ -19,11 +19,13 @@ Run: python3 test_unit.py   (exits 0 on success via unittest.main).
 """
 import os
 import sys
+import io
 import json
 import shutil
 import tempfile
 import importlib.util
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 SKILLBOX_PY = str(Path(__file__).resolve().parent.parent / "bin" / "skillbox.py")
@@ -170,7 +172,7 @@ class SkillboxWorld(unittest.TestCase):
     def test_link_one_refuses_real_file_without_clobber(self):
         # plant a REAL file (not a symlink) where the link would go
         real = self.roots_loaded["claude"] / "alpha"
-        real.write_text("hand-written, not skillbox-owned")
+        real.write_text("hand-written regular file")
         path = self.team_dir / "alpha"
 
         linked, relinked = sb.link_one(self.roots_loaded, "alpha", path, quiet=True)
@@ -179,11 +181,52 @@ class SkillboxWorld(unittest.TestCase):
         # the real file is untouched: still a regular file, content intact
         self.assertFalse(real.is_symlink())
         self.assertTrue(real.is_file())
-        self.assertEqual(real.read_text(), "hand-written, not skillbox-owned")
+        self.assertEqual(real.read_text(), "hand-written regular file")
+
+    def test_link_one_replaces_any_symlink_in_configured_slot(self):
+        path = self.team_dir / "alpha"
+        foreign_target = self.tmp / "foreign-skill"
+        foreign_target.mkdir()
+        slot = self.roots_loaded["claude"] / "alpha"
+        slot.symlink_to(foreign_target)
+
+        linked, relinked = sb.link_one(self.roots_loaded, "alpha", path, quiet=True)
+
+        self.assertEqual((linked, relinked), (3, 1))
+        self.assertEqual(slot.resolve(), path.resolve())
+        self.assertTrue(foreign_target.is_dir())
+
+    def test_cmd_rm_unlinks_any_symlink_in_configured_slot(self):
+        foreign_target = self.tmp / "foreign-skill"
+        foreign_target.mkdir()
+        slot = self.roots_loaded["claude"] / "alpha"
+        slot.symlink_to(foreign_target)
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            sb.cmd_rm(self.roots_loaded, "alpha")
+
+        self.assertFalse(slot.is_symlink())
+        self.assertFalse(slot.exists())
+        self.assertTrue(foreign_target.is_dir())
+        self.assertIn("unlinked claude/alpha", output.getvalue())
+
+    def test_prune_preserves_dangling_link_outside_configured_sources(self):
+        foreign_parent = self.tmp / "foreign-source"
+        foreign_parent.mkdir()
+        slot = self.roots_loaded["claude"] / "foreign"
+        slot.symlink_to(foreign_parent / "missing-skill")
+
+        cleaned = sb.prune_dangling(
+            self.roots_loaded, self.sources, quiet=True
+        )
+
+        self.assertEqual(cleaned, 0)
+        self.assertTrue(slot.is_symlink())
 
     def test_link_one_normalizes_trailing_slash(self):
         path = self.team_dir / "alpha"
-        # Pre-create a skillbox-owned link in claude WITH a trailing-slash target,
+        # Pre-create a configured-slot link in claude WITH a trailing-slash target,
         # mimicking the old captain sync.sh writer. A raw string compare would
         # consider this drifted and relink; the normalizer must treat it as equal.
         claude = self.roots_loaded["claude"]
