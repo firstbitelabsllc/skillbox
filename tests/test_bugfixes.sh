@@ -65,7 +65,7 @@ case "$out4" in *Traceback*) _sb_fail "non-string source path dumped a traceback
 # four roots and symlink it nowhere. Before the fix, beta never entered `installed`
 # (built from symlinks only) so doctor reported "clean (0 skills)" and stayed mute.
 for r in claude agents cursor codex; do
-  mkdir -p "$SB_TMP/roots/$r/beta"; printf 'real, not skillbox-owned\n' > "$SB_TMP/roots/$r/beta/x"
+  mkdir -p "$SB_TMP/roots/$r/beta"; printf 'real regular file\n' > "$SB_TMP/roots/$r/beta/x"
 done
 docj="$(sb_skillbox doctor --json 2>&1)"
 occ="$(printf '%s' "$docj" | python3 -c 'import sys,json

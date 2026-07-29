@@ -99,6 +99,6 @@ sb_contains "About: TL;DR names the SKILL.md unit" "$about" "SKILL.md"
 sb_contains "About: explains same-name overrides plainly" "$about" "overrides"
 sb_contains "About: ships an inline diagram" "$about" "<svg"
 sb_contains "About: diagram shows the Codex-canonical root" "$about" "~/.agents/skills"
-sb_contains "About: links the source repo" "$about" "https://github.com/leojkwan/skillbox"
+sb_contains "About: links the source repo" "$about" "https://github.com/firstbitelabsllc/skillbox"
 
 sb_report
