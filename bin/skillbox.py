@@ -71,6 +71,7 @@ _KEEP_PRIVATE_RE = re.compile(
 
 _BLOCKING_DOCTOR_KINDS = {
     "BROKEN", "MISSING", "DRIFTED", "MISSING-ROOT", "PARITY", "OCCUPIED",
+    "LEGACY-RECOVERY",
 }
 _STRICT_BLOCKING_DOCTOR_KINDS = _BLOCKING_DOCTOR_KINDS | {
     "SOURCE-MISSING", "SOURCE-DIRTY", "SOURCE-DETACHED", "SOURCE-WORKTREE",
@@ -285,7 +286,7 @@ def _open_runtime_dir_at(parent_fd, name):
 
 
 def _new_recovery_journal(parent_fd, skill):
-    """Create a private journal beneath an already-open recovery parent FD."""
+    """Create a private journal beneath an already-open recovery-root FD."""
     for _ in range(128):
         name = f".skillbox-retire-{skill}-{secrets.token_hex(16)}"
         try:
@@ -341,15 +342,47 @@ def _entry_present(dir_fd, name):
         return True
 
 
-def _park_slot_noreplace(root_fd, skill, journal_fd):
+def _park_slot_noreplace(root_fd, skill, journal_fd, mount_name="mount"):
     """Park `skill` in an anchored journal, returning (raw_target, occupied)."""
-    _rename_noreplace_at(root_fd, skill, journal_fd, "mount")
+    _rename_noreplace_at(root_fd, skill, journal_fd, mount_name)
     try:
-        mode = os.stat("mount", dir_fd=journal_fd, follow_symlinks=False).st_mode
-        raw_target = os.readlink("mount", dir_fd=journal_fd) if stat.S_ISLNK(mode) else None
+        mode = os.stat(mount_name, dir_fd=journal_fd, follow_symlinks=False).st_mode
+        raw_target = (os.readlink(mount_name, dir_fd=journal_fd)
+                      if stat.S_ISLNK(mode) else None)
     except OSError:
         raw_target = None
     return raw_target, _entry_present(root_fd, skill)
+
+
+def _install_absolute_recovery_mount(journal_fd, target, expected_raw):
+    """Keep a moved relative link raw while exposing a stable recovery mount.
+
+    A symlink's relative target is interpreted from its own parent. Moving it
+    into the central recovery root therefore changes its meaning. Atomically
+    preserve the original spelling as `raw-mount`, then create `mount` with the
+    verified absolute target. If either step fails, the raw entry remains as a
+    recoverable artifact and the caller must refuse a clean result.
+    """
+    _rename_noreplace_at(journal_fd, "mount", journal_fd, "raw-mount")
+    try:
+        raw_mode = os.stat("raw-mount", dir_fd=journal_fd, follow_symlinks=False).st_mode
+        if (not stat.S_ISLNK(raw_mode)
+                or os.readlink("raw-mount", dir_fd=journal_fd) != expected_raw):
+            raise OSError(errno.EAGAIN, "recovery raw mount changed while rebasing")
+    except OSError:
+        # The moved raw entry is retained, but it is not truthful evidence of
+        # the captured slot. Do not create a normalized `mount` beside it.
+        raise
+    expected = str(target)
+    os.symlink(expected, "mount", dir_fd=journal_fd)
+    try:
+        mode = os.stat("mount", dir_fd=journal_fd, follow_symlinks=False).st_mode
+        if not stat.S_ISLNK(mode) or os.readlink("mount", dir_fd=journal_fd) != expected:
+            raise OSError(errno.EAGAIN, "recovery mount changed while rebasing")
+    except OSError:
+        # Do not delete anything here: `raw-mount` is the durable original
+        # capture if another process races the newly-created normalized link.
+        raise
 
 
 def git_root(path):
@@ -452,78 +485,206 @@ def prune_dangling(roots, sources, quiet=False):
 # left in place and makes sync refuse rather than moving an unrelated folder.
 _LEGACY_RECOVERY_JOURNAL_RE = re.compile(
     r"^\.skillbox-retire-[A-Za-z0-9][A-Za-z0-9._-]{0,63}-[0-9a-f]{32}$")
+_RECOVERY_ROOT_NAME = "recovery"
+
+
+def _is_within(path, ancestor):
+    """Whether `path` is the same as or beneath `ancestor`."""
+    try:
+        path.relative_to(ancestor)
+        return True
+    except ValueError:
+        return False
+
+
+def _resolved_runtime_roots(roots):
+    """Canonical configured roots, including absent paths that may later appear."""
+    return tuple(root.resolve(strict=False) for root in roots.values())
+
+
+def _open_private_recovery_root(roots):
+    """Open the one private journal root, or return a concrete safe failure.
+
+    It is intentionally owned by Skillbox's manifest directory rather than a
+    runtime root: the latter can be recursively discovered by compatibility
+    loaders. Resolve and check the *whole* configured runtime-root union so a
+    nested/broader root cannot rediscover a preserved mount. The held FD keeps
+    the recovery pathname anchored for the subsequent no-replace moves.
+    """
+    runtime_roots = _resolved_runtime_roots(roots)
+    recovery_path = (CONFIG_DIR / _RECOVERY_ROOT_NAME).resolve(strict=False)
+    if any(_is_within(recovery_path, root) for root in runtime_roots):
+        return None, None, (
+            f"recovery root {recovery_path} lies inside a configured runtime root"
+        )
+    try:
+        # The manifest itself proves CONFIG_DIR exists; do not create an
+        # arbitrary missing parent. A journal root is private even before the
+        # private journals within it are made.
+        recovery_path.mkdir(mode=0o700, exist_ok=True)
+        recovery_fd = _open_runtime_dir(recovery_path)
+    except OSError as error:
+        return None, None, f"recovery root {recovery_path} cannot be opened safely ({error})"
+    problem = None
+    try:
+        mode = os.fstat(recovery_fd).st_mode
+        if not stat.S_ISDIR(mode) or mode & 0o077:
+            problem = f"recovery root {recovery_path} is not a private directory"
+        elif not _runtime_root_matches(recovery_path, recovery_fd):
+            problem = f"recovery root {recovery_path} changed while opening"
+        # Re-check after creation/open in case a configured absent path became
+        # real during the operation.
+        elif any(_is_within(recovery_path.resolve(strict=False), root)
+                 for root in _resolved_runtime_roots(roots)):
+            problem = f"recovery root {recovery_path} lies inside a configured runtime root"
+    except OSError as error:
+        problem = f"recovery root {recovery_path} cannot be verified safely ({error})"
+    if problem:
+        os.close(recovery_fd)
+        return None, None, problem
+    return recovery_path, recovery_fd, None
 
 
 def migrate_legacy_recovery_journals(roots):
-    """Move loadable v1.0.0 recovery journals beside, not under, skill roots.
+    """Move v1.0.0 recovery journals to the one private recovery root.
 
     Returns `(archives, problems)`. A normal sync must refuse on a journal it
     cannot verify or move, because otherwise it would falsely report a clean
-    runtime while a compatibility loader could still activate that preserved
-    link. Empty journals are harmless (they have no `mount` entry) and are
-    intentionally left alone: they may be evidence from an interrupted run.
+    runtime while a compatibility loader could still activate a preserved
+    link. Empty journals are moved too: preserving an interrupted-run receipt
+    must not leave an in-root legacy layout for Doctor to report forever.
     """
     archives, problems = [], []
+    # Do not create the recovery root during an ordinary clean sync. First
+    # establish whether there is a legacy artifact that actually needs moving.
+    pending = []
     for rname, root in roots.items():
         if not root.is_dir():
             continue
         root_path = root.resolve(strict=False)
-        parent_path = root_path.parent
-        root_fd = parent_fd = None
         try:
-            root_fd = _open_runtime_dir(root_path)
-            parent_fd = _open_runtime_dir(parent_path)
+            names = [name for name in sorted(os.listdir(root_path))
+                     if _LEGACY_RECOVERY_JOURNAL_RE.fullmatch(name)]
         except OSError as error:
-            if root_fd is not None:
-                os.close(root_fd)
-            problems.append(f"{rname} recovery root cannot be opened safely ({error})")
+            problems.append(f"{rname} legacy recovery journal cannot be inspected safely ({error})")
             continue
-        try:
-            # `_open_runtime_dir` may use macOS O_SEARCH, which deliberately
-            # cannot enumerate entries. Enumerate the pathname, then validate
-            # each selected name through the held root FD before moving it.
-            for journal_name in sorted(os.listdir(root_path)):
-                if not _LEGACY_RECOVERY_JOURNAL_RE.fullmatch(journal_name):
+        if names:
+            pending.append((rname, root_path, names))
+    if problems or not pending:
+        return archives, problems
+
+    recovery_path, recovery_fd, recovery_problem = _open_private_recovery_root(roots)
+    if recovery_problem:
+        return archives, [recovery_problem]
+    try:
+        recovery_dev = os.fstat(recovery_fd).st_dev
+        # Preflight every present root against the one journal home before any
+        # rename. Atomic no-replace rename cannot cross filesystems, and a
+        # partial migration would leave the user with a misleading half-clean
+        # doctor result.
+        for rname, root_path, names in pending:
+            root_fd = None
+            try:
+                root_fd = _open_runtime_dir(root_path)
+            except OSError as error:
+                problems.append(f"{rname} legacy recovery journal cannot be inspected safely ({error})")
+                continue
+            try:
+                if os.fstat(root_fd).st_dev != recovery_dev:
+                    problems.append(
+                        f"{rname} is on another filesystem from recovery root {recovery_path}"
+                    )
                     continue
-                journal_fd = None
-                try:
-                    journal_fd = _open_runtime_dir_at(root_fd, journal_name)
-                    mode = os.fstat(journal_fd).st_mode
-                    if not stat.S_ISDIR(mode) or mode & 0o077:
-                        problems.append(f"{rname}/{journal_name} is not a private directory")
-                        continue
+                if not _runtime_root_matches(root_path, root_fd):
+                    problems.append(f"{rname} runtime root changed before legacy recovery migration")
+                    continue
+            finally:
+                if root_fd is not None:
+                    os.close(root_fd)
+        if problems:
+            return archives, problems
+
+        for rname, root_path, names in pending:
+            root_fd = None
+            try:
+                root_fd = _open_runtime_dir(root_path)
+                if os.fstat(root_fd).st_dev != recovery_dev:
+                    problems.append(
+                        f"{rname} is on another filesystem from recovery root {recovery_path}"
+                    )
+                    continue
+                # `_open_runtime_dir` may use macOS O_SEARCH, which deliberately
+                # cannot enumerate entries. The names above are only candidates;
+                # validate each one through the held root FD before moving it.
+                for journal_name in names:
+                    journal_fd = None
                     try:
-                        os.stat("mount", dir_fd=journal_fd, follow_symlinks=False)
-                    except FileNotFoundError:
-                        # No link remains to discover; keep interrupted-run
-                        # evidence rather than racing a cleanup.
-                        continue
-                    if not _runtime_root_matches(root_path, root_fd):
-                        problems.append(f"{rname}/{journal_name} runtime root changed before migration")
-                        continue
-                    if not _journal_matches(root_fd, journal_name, journal_fd):
-                        problems.append(f"{rname}/{journal_name} changed before migration")
-                        continue
-                    try:
-                        _rename_noreplace_at(root_fd, journal_name, parent_fd, journal_name)
+                        journal_fd = _open_runtime_dir_at(root_fd, journal_name)
+                        mode = os.fstat(journal_fd).st_mode
+                        if not stat.S_ISDIR(mode) or mode & 0o077:
+                            problems.append(f"{rname}/{journal_name} is not a private directory")
+                            continue
+                        if not _runtime_root_matches(root_path, root_fd):
+                            problems.append(f"{rname}/{journal_name} runtime root changed before migration")
+                            continue
+                        if not _journal_matches(root_fd, journal_name, journal_fd):
+                            problems.append(f"{rname}/{journal_name} changed before migration")
+                            continue
+                        relative_mount_target = raw_mount_target = None
+                        try:
+                            mount_mode = os.stat(
+                                "mount", dir_fd=journal_fd, follow_symlinks=False
+                            ).st_mode
+                            if stat.S_ISLNK(mount_mode):
+                                raw_mount_target = os.readlink("mount", dir_fd=journal_fd)
+                                if not Path(raw_mount_target).is_absolute():
+                                    # v1 moved the live runtime symlink here
+                                    # unchanged, so its original relative base
+                                    # was the runtime root, not this journal.
+                                    relative_mount_target = (
+                                        root_path / raw_mount_target
+                                    ).resolve(strict=False)
+                        except FileNotFoundError:
+                            pass  # Interrupted empty journal: preserve it unchanged.
+                        if not _runtime_root_matches(recovery_path, recovery_fd):
+                            problems.append(f"{rname}/{journal_name} recovery root changed before migration")
+                            continue
+                        try:
+                            _rename_noreplace_at(root_fd, journal_name, recovery_fd, journal_name)
+                        except OSError as error:
+                            problems.append(f"{rname}/{journal_name} could not be relocated ({error})")
+                            continue
+                        if not _journal_matches(recovery_fd, journal_name, journal_fd):
+                            problems.append(
+                                f"{rname}/{journal_name} moved but the recovery path is untrusted")
+                            continue
+                        if relative_mount_target is not None:
+                            try:
+                                _install_absolute_recovery_mount(
+                                    journal_fd, relative_mount_target, raw_mount_target
+                                )
+                            except OSError as error:
+                                problems.append(
+                                    f"{rname}/{journal_name} moved but its relative mount could not "
+                                    f"be rebased safely ({error})")
+                                continue
+                            if not _journal_matches(recovery_fd, journal_name, journal_fd):
+                                problems.append(
+                                    f"{rname}/{journal_name} rebased but the recovery path is untrusted")
+                                continue
+                        archives.append(recovery_path / journal_name / "mount")
                     except OSError as error:
-                        problems.append(f"{rname}/{journal_name} could not be relocated ({error})")
-                        continue
-                    if not _journal_matches(parent_fd, journal_name, journal_fd):
-                        problems.append(
-                            f"{rname}/{journal_name} moved but the sibling recovery path is untrusted")
-                        continue
-                    archives.append(parent_path / journal_name / "mount")
-                except OSError as error:
-                    problems.append(f"{rname}/{journal_name} cannot be inspected safely ({error})")
-                finally:
-                    if journal_fd is not None:
-                        os.close(journal_fd)
-        finally:
-            if parent_fd is not None:
-                os.close(parent_fd)
-            if root_fd is not None:
-                os.close(root_fd)
+                        problems.append(f"{rname}/{journal_name} cannot be inspected safely ({error})")
+                    finally:
+                        if journal_fd is not None:
+                            os.close(journal_fd)
+            except OSError as error:
+                problems.append(f"{rname} legacy recovery journal cannot be reopened safely ({error})")
+            finally:
+                if root_fd is not None:
+                    os.close(root_fd)
+    finally:
+        os.close(recovery_fd)
     return archives, problems
 
 
@@ -862,6 +1023,28 @@ def cmd_retire(roots, sources, skill, source_id):
     # The final move itself is an OS no-replace rename between anchored parent
     # FDs, so it never overwrites a recovery entry planted by another writer.
     retained, failure = [], None
+    recovery_path = recovery_fd = None
+    if removable:
+        recovery_path, recovery_fd, recovery_problem = _open_private_recovery_root(roots)
+        if recovery_problem:
+            for _, _, _, root_fd, _ in removable:
+                os.close(root_fd)
+            sys.exit(f"cannot retire '{skill}' from {source_id}: {recovery_problem}")
+        try:
+            recovery_dev = os.fstat(recovery_fd).st_dev
+            other_volume = [str(root / skill) for _, root, _, root_fd, _ in removable
+                            if os.fstat(root_fd).st_dev != recovery_dev]
+        except OSError as error:
+            os.close(recovery_fd)
+            for _, _, _, root_fd, _ in removable:
+                os.close(root_fd)
+            sys.exit(f"cannot retire '{skill}' from {source_id}: cannot verify recovery root volume ({error})")
+        if other_volume:
+            os.close(recovery_fd)
+            for _, _, _, root_fd, _ in removable:
+                os.close(root_fd)
+            sys.exit(f"cannot retire '{skill}' from {source_id}: one private recovery root cannot "
+                     "atomically park runtime slots on another filesystem: " + "; ".join(other_volume))
     try:
         for rname, root, root_path, root_fd, raw_target in removable:
             if not _runtime_root_matches(root_path, root_fd):
@@ -870,15 +1053,12 @@ def cmd_retire(roots, sources, skill, source_id):
                 break
 
             # Compatibility loaders can recursively scan every SKILL.md below
-            # a runtime root, including dot-directories. Keep recovery links
-            # adjacent to that root so an archived link is never rediscovered
-            # as an active skill. This remains an atomic no-replace rename: a
-            # runtime root and its parent are necessarily on the same volume.
-            parent_path = root_path.parent
-            try:
-                parent_fd = _open_runtime_dir(parent_path)
-            except OSError as error:
-                failure = f"could not open recovery parent for {root / skill}: {error}"
+            # a runtime root, including dot-directories. One private recovery
+            # root sits outside the complete configured-root union, so a
+            # broader nested root cannot rediscover an archived link.
+            if not _runtime_root_matches(recovery_path, recovery_fd):
+                failure = (f"recovery root changed before parking {root / skill}; "
+                           "no runtime slot was moved")
                 break
             journal_fd = None
             try:
@@ -887,13 +1067,15 @@ def cmd_retire(roots, sources, skill, source_id):
                                "no runtime slot was moved")
                     break
                 try:
-                    journal_name = _new_recovery_journal(parent_fd, skill)
+                    journal_name = _new_recovery_journal(recovery_fd, skill)
                 except OSError as error:
-                    failure = f"could not create a recovery journal for {root / skill}: {error}"
+                    failure = f"could not create recovery journal for {root / skill}: {error}"
                     break
-                archive = parent_path / journal_name / "mount"
+                archive = recovery_path / journal_name / "mount"
+                raw_archive = recovery_path / journal_name / "raw-mount"
+                is_relative_target = not Path(raw_target).is_absolute()
                 try:
-                    journal_fd = _open_runtime_dir_at(parent_fd, journal_name)
+                    journal_fd = _open_runtime_dir_at(recovery_fd, journal_name)
                 except OSError as error:
                     failure = f"could not open recovery journal for {root / skill}: {error}"
                     break
@@ -902,7 +1084,7 @@ def cmd_retire(roots, sources, skill, source_id):
                 # makes the path in our receipt truthful.  If another process
                 # renames/replaces the journal, do not claim the old pathname
                 # can recover the held mount.
-                if not _journal_matches(parent_fd, journal_name, journal_fd):
+                if not _journal_matches(recovery_fd, journal_name, journal_fd):
                     failure = (f"recovery journal for {root / skill} changed before parking; "
                                "no runtime slot was moved")
                     break
@@ -912,7 +1094,8 @@ def cmd_retire(roots, sources, skill, source_id):
                     )
                 except OSError as error:
                     if (_runtime_root_matches(root_path, root_fd)
-                            and _journal_matches(parent_fd, journal_name, journal_fd)):
+                            and _runtime_root_matches(recovery_path, recovery_fd)
+                            and _journal_matches(recovery_fd, journal_name, journal_fd)):
                         retained.append(archive)
                         failure = f"could not park {root / skill}: {error}"
                     else:
@@ -924,30 +1107,56 @@ def cmd_retire(roots, sources, skill, source_id):
                     failure = (f"{root / skill} was parked, but its runtime root changed "
                                "during retirement; the nominal recovery path is untrusted")
                     break
-                if not _journal_matches(parent_fd, journal_name, journal_fd):
+                if not _runtime_root_matches(recovery_path, recovery_fd):
+                    failure = (f"{root / skill} was parked, but its recovery root changed "
+                               "during retirement; the nominal recovery path is untrusted")
+                    break
+                if not _journal_matches(recovery_fd, journal_name, journal_fd):
                     failure = (f"{root / skill} was parked, but its recovery journal changed "
                                "during retirement; the nominal recovery path is untrusted")
                     break
+
+                captured_expected = False
+                if captured_raw_target is not None:
+                    captured_candidate = Path(captured_raw_target)
+                    if not captured_candidate.is_absolute():
+                        captured_candidate = root_path / captured_candidate
+                    captured_expected = (
+                        captured_raw_target == raw_target and
+                        captured_candidate.resolve(strict=False) == expected_resolved
+                    )
+                if not captured_expected:
+                    retained.append(archive)
+                    failure = (f"{root / skill} changed during retirement; its captured entry is "
+                               f"preserved in {journal_name}")
+                    break
+
+                if is_relative_target:
+                    try:
+                        _install_absolute_recovery_mount(
+                            journal_fd, expected_resolved, captured_raw_target
+                        )
+                    except OSError as error:
+                        if (_runtime_root_matches(recovery_path, recovery_fd)
+                                and _journal_matches(recovery_fd, journal_name, journal_fd)):
+                            retained.append(raw_archive if _entry_present(journal_fd, "raw-mount")
+                                            else archive)
+                            failure = (f"could not preserve a stable recovery mount for {root / skill}: "
+                                       f"{error}")
+                        else:
+                            failure = (f"recovery journal for {root / skill} changed while rebasing "
+                                       "its relative target; the nominal recovery path is untrusted")
+                        break
+                    if not _journal_matches(recovery_fd, journal_name, journal_fd):
+                        failure = (f"{root / skill} was parked, but its recovery journal changed "
+                                   "while rebasing; the nominal recovery path is untrusted")
+                        break
 
                 retained.append(archive)
             finally:
                 if journal_fd is not None:
                     os.close(journal_fd)
-                os.close(parent_fd)
 
-            captured_expected = False
-            if captured_raw_target is not None:
-                captured_candidate = Path(captured_raw_target)
-                if not captured_candidate.is_absolute():
-                    captured_candidate = root_path / captured_candidate
-                captured_expected = (
-                    captured_raw_target == raw_target and
-                    captured_candidate.resolve(strict=False) == expected_resolved
-                )
-            if not captured_expected:
-                failure = (f"{root / skill} changed during retirement; its captured entry is "
-                           f"preserved in {journal_name}")
-                break
             # A new entry can arrive immediately after the move.  Do not touch
             # it or claim the host is retired; preserve the original archive.
             if source_reoccupied or _entry_present(root_fd, skill):
@@ -955,6 +1164,11 @@ def cmd_retire(roots, sources, skill, source_id):
                            f"preserved in {journal_name}")
                 break
     finally:
+        if recovery_fd is not None:
+            try:
+                os.close(recovery_fd)
+            except OSError:
+                pass
         for _, _, _, root_fd, _ in removable:
             try:
                 os.close(root_fd)
@@ -1221,6 +1435,18 @@ def doctor_problems(roots, sources):
     for rname, root in roots.items():
         if not root.is_dir():
             problems.append(("MISSING-ROOT", rname, str(root)))
+            continue
+        try:
+            for entry in root.iterdir():
+                if _LEGACY_RECOVERY_JOURNAL_RE.fullmatch(entry.name):
+                    problems.append((
+                        "LEGACY-RECOVERY", f"{rname}/{entry.name}",
+                        "run skillbox sync --no-pull to relocate it outside active runtime roots",
+                    ))
+        except OSError:
+            # The normal per-skill pass will report actionable mount trouble;
+            # do not turn an unreadable root into a false clean journal scan.
+            pass
     installed = set()
     for root in roots.values():
         if root.is_dir():
