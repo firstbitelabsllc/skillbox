@@ -27,6 +27,7 @@ import importlib.util
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 SKILLBOX_PY = str(Path(__file__).resolve().parent.parent / "bin" / "skillbox.py")
 
@@ -153,6 +154,24 @@ class SkillboxWorld(unittest.TestCase):
         # owners listed winner-first in precedence order
         self.assertEqual(collisions["shared"], ["team", "private"])
 
+    def test_source_exclude_reveals_lower_priority_copy(self):
+        # Exclusion belongs to one source only. Hiding the high-priority
+        # team/shared must let the private/shared copy become the real winner.
+        team = dict(self.sources[0], exclude=frozenset({"shared"}))
+        plan, collisions = sb.resolve_plan([team, *self.sources[1:]])
+        src, path = plan["shared"]
+        self.assertEqual(src["id"], "private")
+        self.assertEqual(Path(path), self.priv_dir / "shared")
+        self.assertNotIn("shared", collisions)
+
+    def test_source_exclude_hides_a_single_skill_source(self):
+        # A single-skill source is how the global Shadow leaf is mounted. It
+        # must support the same reversible retirement boundary as a directory.
+        solo = dict(self.sources[2], exclude=frozenset({"solo"}))
+        plan, _ = sb.resolve_plan([*self.sources[:2], solo])
+        self.assertNotIn("solo", plan)
+        self.assertEqual(sb.source_skills(solo), {})
+
     # ── link_one ───────────────────────────────────────────────────────────
     def test_link_one_links_then_idempotent(self):
         path = self.team_dir / "alpha"
@@ -210,6 +229,280 @@ class SkillboxWorld(unittest.TestCase):
         self.assertFalse(slot.exists())
         self.assertTrue(foreign_target.is_dir())
         self.assertIn("unlinked claude/alpha", output.getvalue())
+
+    def test_cmd_retire_preserves_a_slot_replaced_during_mutation(self):
+        # The preflight check and mutation are separate filesystem operations.
+        # If another writer replaces a slot in between, retirement must preserve
+        # that replacement rather than deleting it by the stale pathname.
+        team = dict(self.sources[0], exclude=frozenset({"beta"}))
+        sources = [team, *self.sources[1:]]
+        target = self.team_dir / "beta"
+        slots = [root / "beta" for root in self.roots_loaded.values()]
+        for slot in slots:
+            slot.symlink_to(target)
+
+        original_rename_noreplace = sb._rename_noreplace_at
+        foreign_contents = "FOREIGN\n"
+        replaced = {"done": False}
+
+        def replace_source_then_park(src_fd, src_name, dst_fd, dst_name):
+            if not replaced["done"]:
+                os.unlink(src_name, dir_fd=src_fd)
+                fd = os.open(
+                    src_name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=src_fd,
+                )
+                try:
+                    os.write(fd, foreign_contents.encode())
+                finally:
+                    os.close(fd)
+                replaced["done"] = True
+            return original_rename_noreplace(src_fd, src_name, dst_fd, dst_name)
+
+        with patch.object(sb, "_rename_noreplace_at", new=replace_source_then_park):
+            with self.assertRaises(SystemExit) as raised:
+                sb.cmd_retire(self.roots_loaded, sources, "beta", "team")
+
+        self.assertTrue(replaced["done"])
+        self.assertIn("changed", str(raised.exception))
+        self.assertFalse(slots[0].exists())
+        self.assertFalse(slots[0].is_symlink())
+        for slot in slots[1:]:
+            self.assertTrue(slot.is_symlink())
+            self.assertEqual(slot.resolve(), target.resolve())
+        journals = list(slots[0].parent.glob(".skillbox-retire-beta-*"))
+        self.assertEqual(len(journals), 1)
+        preserved = journals[0] / "mount"
+        self.assertTrue(preserved.is_file())
+        self.assertFalse(preserved.is_symlink())
+        self.assertEqual(preserved.read_text(), foreign_contents)
+
+    def test_cmd_retire_never_overwrites_a_raced_recovery_entry(self):
+        # `rename()` replaces an existing destination on POSIX.  A recovery
+        # journal is only safe if the final move refuses an entry another
+        # writer planted in it; the live source link must remain untouched.
+        team = dict(self.sources[0], exclude=frozenset({"beta"}))
+        sources = [team, *self.sources[1:]]
+        target = self.team_dir / "beta"
+        slots = [root / "beta" for root in self.roots_loaded.values()]
+        for slot in slots:
+            slot.symlink_to(target)
+
+        original_rename_noreplace = getattr(sb, "_rename_noreplace_at", None)
+        planted = {"done": False}
+
+        def plant_archive_then_move(src_fd, src_name, dst_fd, dst_name):
+            if not planted["done"]:
+                fd = os.open(
+                    dst_name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=dst_fd,
+                )
+                try:
+                    os.write(fd, b"FOREIGN RECOVERY ENTRY\n")
+                finally:
+                    os.close(fd)
+                planted["done"] = True
+            return original_rename_noreplace(src_fd, src_name, dst_fd, dst_name)
+
+        with patch.object(
+            sb,
+            "_rename_noreplace_at",
+            new=plant_archive_then_move,
+            create=True,
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                sb.cmd_retire(self.roots_loaded, sources, "beta", "team")
+
+        self.assertTrue(planted["done"])
+        self.assertIn("recovery retained", str(raised.exception))
+        for slot in slots:
+            self.assertTrue(slot.is_symlink())
+            self.assertEqual(slot.resolve(), target.resolve())
+        journals = list(self.tmp.rglob(".skillbox-retire-beta-*"))
+        self.assertEqual(len(journals), 1)
+        preserved = journals[0] / "mount"
+        self.assertTrue(preserved.is_file())
+        self.assertFalse(preserved.is_symlink())
+        self.assertEqual(preserved.read_text(), "FOREIGN RECOVERY ENTRY\n")
+
+    def test_cmd_retire_refuses_to_claim_a_journal_path_replaced_mid_park(self):
+        # The recovery journal is held by an FD, so a pathname rename cannot
+        # divert the no-replace move.  But its old pathname would no longer be
+        # a truthful recovery receipt.  Detect that and fail without printing
+        # the stale path; the captured link remains in the moved journal.
+        team = dict(self.sources[0], exclude=frozenset({"beta"}))
+        sources = [team, *self.sources[1:]]
+        target = self.team_dir / "beta"
+        slots = [root / "beta" for root in self.roots_loaded.values()]
+        for slot in slots:
+            slot.symlink_to(target)
+
+        original_park = sb._park_slot_noreplace
+        raced = {}
+
+        def move_journal_then_park(root_fd, skill, journal_fd):
+            if not raced:
+                root = slots[0].parent
+                journals = list(root.glob(".skillbox-retire-beta-*"))
+                self.assertEqual(len(journals), 1)
+                original = journals[0]
+                moved = root / f"{original.name}-moved"
+                os.rename(original, moved)
+                original.mkdir(mode=0o700)
+                raced.update(original=original, moved=moved)
+            return original_park(root_fd, skill, journal_fd)
+
+        with patch.object(sb, "_park_slot_noreplace", new=move_journal_then_park):
+            with self.assertRaises(SystemExit) as raised:
+                sb.cmd_retire(self.roots_loaded, sources, "beta", "team")
+
+        message = str(raised.exception)
+        self.assertIn("nominal recovery path is untrusted", message)
+        self.assertNotIn(str(raced["original"] / "mount"), message)
+        self.assertFalse(slots[0].exists())
+        self.assertFalse(slots[0].is_symlink())
+        self.assertTrue((raced["moved"] / "mount").is_symlink())
+        self.assertEqual((raced["moved"] / "mount").resolve(), target.resolve())
+        self.assertFalse((raced["original"] / "mount").exists())
+        for slot in slots[1:]:
+            self.assertTrue(slot.is_symlink())
+            self.assertEqual(slot.resolve(), target.resolve())
+
+    def test_cmd_retire_refuses_to_claim_a_runtime_root_replaced_mid_park(self):
+        # Root FDs anchor the move even if a same-user writer renames the
+        # configured root.  The configured pathname is then a false receipt,
+        # so retirement must fail rather than print it as recovery evidence.
+        team = dict(self.sources[0], exclude=frozenset({"beta"}))
+        sources = [team, *self.sources[1:]]
+        target = self.team_dir / "beta"
+        slots = [root / "beta" for root in self.roots_loaded.values()]
+        for slot in slots:
+            slot.symlink_to(target)
+
+        original_park = sb._park_slot_noreplace
+        raced = {}
+
+        def move_root_then_park(root_fd, skill, journal_fd):
+            if not raced:
+                root = slots[0].parent
+                moved = root.parent / f"{root.name}-moved"
+                os.rename(root, moved)
+                root.mkdir(mode=0o700)
+                raced.update(original=root, moved=moved)
+            return original_park(root_fd, skill, journal_fd)
+
+        with patch.object(sb, "_park_slot_noreplace", new=move_root_then_park):
+            with self.assertRaises(SystemExit) as raised:
+                sb.cmd_retire(self.roots_loaded, sources, "beta", "team")
+
+        message = str(raised.exception)
+        self.assertIn("nominal recovery path is untrusted", message)
+        journals = list(raced["moved"].glob(".skillbox-retire-beta-*"))
+        self.assertEqual(len(journals), 1)
+        actual_archive = journals[0] / "mount"
+        self.assertNotIn(str(raced["original"] / journals[0].name / "mount"), message)
+        self.assertTrue(actual_archive.is_symlink())
+        self.assertEqual(actual_archive.resolve(), target.resolve())
+        self.assertFalse((raced["original"] / "beta").exists())
+        self.assertFalse((raced["original"] / "beta").is_symlink())
+        for slot in slots[1:]:
+            self.assertTrue(slot.is_symlink())
+            self.assertEqual(slot.resolve(), target.resolve())
+
+    def test_mutation_lock_refuses_a_second_skillbox_writer(self):
+        # All public mount mutations share one cooperative lock so `rm`/sync
+        # cannot race a retirement after its preflight passes.
+        with sb.mutation_lock():
+            with self.assertRaises(SystemExit) as raised:
+                with sb.mutation_lock():
+                    pass
+        self.assertIn("another skillbox mutation", str(raised.exception).lower())
+
+    def test_main_takes_the_mutation_lock_before_loading_a_sync_plan(self):
+        # A stale sync that loaded its plan before waiting could re-mount a
+        # freshly retired alias.  The CLI must refuse before it even reads the
+        # manifest while another Skillbox writer holds the shared lock.
+        with sb.mutation_lock(), \
+             patch.object(sb, "load", wraps=sb.load) as load_manifest, \
+             patch.object(sys, "argv", ["skillbox", "sync", "--no-pull"]):
+            with self.assertRaises(SystemExit) as raised:
+                sb.main()
+        self.assertIn("another skillbox mutation", str(raised.exception).lower())
+        load_manifest.assert_not_called()
+        for root in self.roots_loaded.values():
+            self.assertFalse((root / "alpha").exists())
+            self.assertFalse((root / "alpha").is_symlink())
+
+    def test_cmd_retire_preserves_earlier_link_when_later_park_fails(self):
+        # A multi-root retirement must never delete an earlier link if a later
+        # root refuses the move. The first link remains in its hidden recovery
+        # folder instead of being renamed back over a concurrently new slot.
+        team = dict(self.sources[0], exclude=frozenset({"beta"}))
+        sources = [team, *self.sources[1:]]
+        target = self.team_dir / "beta"
+        slots = [root / "beta" for root in self.roots_loaded.values()]
+        for slot in slots:
+            slot.symlink_to(target)
+
+        original_rename_noreplace = sb._rename_noreplace_at
+        calls = []
+
+        def park_then_fail(src_fd, src_name, dst_fd, dst_name):
+            calls.append(src_name)
+            if len(calls) == 2:
+                raise PermissionError("simulated later-root refusal")
+            return original_rename_noreplace(src_fd, src_name, dst_fd, dst_name)
+
+        with patch.object(sb, "_rename_noreplace_at", new=park_then_fail):
+            with self.assertRaises(SystemExit) as raised:
+                sb.cmd_retire(self.roots_loaded, sources, "beta", "team")
+
+        self.assertIn("recovery retained", str(raised.exception))
+        self.assertFalse(slots[0].exists())
+        self.assertFalse(slots[0].is_symlink())
+        for slot in slots[1:]:
+            self.assertTrue(slot.is_symlink())
+            self.assertEqual(slot.resolve(), target.resolve())
+        journals = list(slots[0].parent.glob(".skillbox-retire-beta-*"))
+        self.assertEqual(len(journals), 1)
+        self.assertTrue((journals[0] / "mount").is_symlink())
+        self.assertEqual((journals[0] / "mount").resolve(), target.resolve())
+
+    def test_cmd_retire_parks_relative_symlinks(self):
+        # A valid source link may be relative to its runtime root. Moving it
+        # into a hidden journal must validate that original interpretation,
+        # not treat the archived relative path as a foreign dangling link.
+        team = dict(self.sources[0], exclude=frozenset({"beta"}))
+        sources = [team, *self.sources[1:]]
+        target = self.team_dir / "beta"
+        slots = [root / "beta" for root in self.roots_loaded.values()]
+        raw_targets = set()
+        for slot in slots:
+            raw_target = os.path.relpath(target, slot.parent)
+            raw_targets.add(raw_target)
+            slot.symlink_to(raw_target)
+
+        with redirect_stdout(io.StringIO()):
+            sb.cmd_retire(self.roots_loaded, sources, "beta", "team")
+
+        for slot in slots:
+            self.assertFalse(slot.exists())
+            self.assertFalse(slot.is_symlink())
+        # Do not use Path.rglob here: Python's recursive glob treatment of
+        # dot-prefixed journal folders differs across supported versions. Each
+        # runtime root has exactly one known hidden journal after this success.
+        parked = []
+        for root in self.roots_loaded.values():
+            journals = list(root.glob(".skillbox-retire-beta-*"))
+            self.assertEqual(len(journals), 1)
+            parked.append(journals[0] / "mount")
+        self.assertEqual(len(parked), len(slots))
+        self.assertTrue(all(path.is_symlink() for path in parked))
+        self.assertEqual({os.readlink(path) for path in parked}, raw_targets)
 
     def test_prune_preserves_dangling_link_outside_configured_sources(self):
         foreign_parent = self.tmp / "foreign-source"

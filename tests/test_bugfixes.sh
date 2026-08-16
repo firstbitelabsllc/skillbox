@@ -60,6 +60,19 @@ sb_eq "non-string source path exits nonzero" "$([ $rc4 -ne 0 ] && echo nz || ech
 case "$out4" in *Traceback*) _sb_fail "non-string source path dumped a traceback";;
   *) _sb_pass "non-string source path: clean error, no traceback";; esac
 
+# A source exclusion becomes part of the resolver's path boundary; reject
+# scalar, duplicate, and path-like values instead of silently accepting them.
+for badexclude in 'exclude = "beta"' 'exclude = ["beta", "beta"]' 'exclude = ["../beta"]'; do
+  badex="$SB_TMP/bad-exclude-$RANDOM.toml"
+  printf '[roots]\nclaude = "%s"\n[sources.x]\npath = "%s"\n%s\n' \
+    "$SB_TMP/roots/claude" "$SB_TMP/src/team/skills" "$badexclude" > "$badex"
+  out_ex="$(SKILLBOX_MANIFEST="$badex" python3 "$SKILLBOX_BIN" list 2>&1)"; rc_ex=$?
+  sb_eq "invalid source exclude exits nonzero: $badexclude" \
+    "$([ $rc_ex -ne 0 ] && echo nz || echo z)" "nz"
+  case "$out_ex" in *Traceback*) _sb_fail "invalid source exclude has no traceback: $badexclude";;
+    *) _sb_pass "invalid source exclude has no traceback: $badexclude";; esac
+done
+
 # ── 3. doctor must not go silent when a winner is blocked in EVERY root ───────
 # 'beta' is a real team skill. Plant a real (non-symlink) dir in its slot in ALL
 # four roots and symlink it nowhere. Before the fix, beta never entered `installed`

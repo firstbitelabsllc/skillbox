@@ -8,6 +8,7 @@ Commands:
   skillbox new <name> [--repo ID]    scaffold a new skill (default: your own repo) and link it everywhere
   skillbox add <name> [--source ID]  symlink an existing source skill into every runtime root
   skillbox rm <name>                 unlink named runtime-slot symlinks (source folder untouched)
+  skillbox retire <name> --source ID safely park an excluded source leaf; refuses foreign or replacement mounts
   skillbox promote <name> --to ID    move the skill to another source repo (reversible) and relink
   skillbox promote <name> --to org   emit a plugin manifest + print the DRAFT marketplace PR (never sends)
   skillbox source add <id> <path>    add a local source repo (e.g. a teammate's clone); `source rm <id>` reverses
@@ -25,7 +26,8 @@ Tier is never a stored flag — it is which source repo holds the folder. `new`
 lands in your own repo by default; `promote` (later) is the one deliberate
 sharing verb. Codex reads ~/.agents/skills; ~/.codex/skills is Cursor-compat only.
 """
-import os, sys, json, re, hashlib, subprocess
+import os, sys, json, re, hashlib, subprocess, ctypes, errno, stat, fcntl, secrets
+from contextlib import contextmanager
 from pathlib import Path
 try:
     import tomllib  # Python 3.11+ stdlib
@@ -99,9 +101,15 @@ def load():
             # on disk (incl. a teammate's clone).
             if "path" not in s:
                 continue
+            exclude = s.get("exclude", [])
+            if not isinstance(exclude, list) or not all(isinstance(name, str) for name in exclude):
+                raise TypeError("source exclude must be an array of skill names")
+            if len(exclude) != len(set(exclude)):
+                raise TypeError("source exclude must not repeat a skill name")
             sources.append({
                 "id": sid, "path": Path(os.path.expanduser(s["path"])),
                 "priority": s.get("priority", 99), "single_skill": s.get("single_skill"),
+                "exclude": frozenset(require_name(name) for name in exclude),
             })
         sources.sort(key=lambda s: s["priority"])
     except ((tomllib.TOMLDecodeError if tomllib else ValueError), json.JSONDecodeError) as e:
@@ -115,14 +123,28 @@ def load():
 
 
 def source_skills(src):
+    excluded = src.get("exclude", frozenset())
     if src["single_skill"]:
-        return {src["single_skill"]: src["path"]} if (src["path"] / "SKILL.md").exists() else {}
+        name = src["single_skill"]
+        return ({name: src["path"]}
+                if name not in excluded and (src["path"] / "SKILL.md").exists() else {})
     out = {}
     if src["path"].is_dir():
         for d in src["path"].iterdir():
-            if (d / "SKILL.md").exists():
+            if d.name not in excluded and (d / "SKILL.md").exists():
                 out[d.name] = d
     return out
+
+
+def source_skill_path(src, name):
+    """Physical leaf path for a source/name pair, including a single-skill root.
+
+    This deliberately does not consult `exclude`: retirement needs to recognize
+    an archived source folder even after resolver discovery has hidden it.
+    """
+    if src.get("single_skill"):
+        return src["path"] if src["single_skill"] == name else None
+    return src["path"] / name
 
 
 def resolve(skill, sources, prefer=None):
@@ -153,6 +175,173 @@ def resolve_plan(sources):
 def collision_map(sources):
     _, collisions = resolve_plan(sources)
     return collisions
+
+
+# Every normal Skillbox mutation takes this cooperative lock before it reads
+# the manifest.  It serializes `sync`, `add`, `rm`, and `retire` so a stale
+# plan cannot re-create an alias just retired by another Skillbox command.  The
+# file stays in place: flock is released automatically if the process dies,
+# while unlinking the lock pathname would create a second-lock race.
+_MUTATION_LOCK_NAME = ".skillbox-mutation.lock"
+
+
+@contextmanager
+def mutation_lock():
+    lock = CONFIG_DIR / _MUTATION_LOCK_NAME
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(lock, flags, 0o600)
+    except OSError as error:
+        sys.exit(f"cannot acquire Skillbox mutation lock at {lock}: {error}")
+    try:
+        mode = os.fstat(fd).st_mode
+        if not stat.S_ISREG(mode) or mode & 0o077:
+            sys.exit(f"unsafe Skillbox mutation lock at {lock}: expected a private regular file")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            sys.exit("another Skillbox mutation is active; wait for it to finish and retry")
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+# Darwin's ordinary rename() replaces the destination.  `renameatx_np` with
+# RENAME_EXCL atomically refuses a pre-existing destination instead.  We use
+# directory FDs so the source runtime root and recovery journal stay anchored
+# even if their pathnames are moved while a non-cooperating process races us.
+_RENAME_EXCL = 0x00000004
+
+
+def _rename_noreplace_at(src_fd, src_name, dst_fd, dst_name):
+    """Atomically move one directory entry, refusing an occupied destination.
+
+    The supported Skillbox platforms are macOS and Linux.  On a host without a
+    kernel no-replace primitive, retirement fails closed rather than falling
+    back to an overwriting rename.
+    """
+    if sys.platform == "darwin":
+        libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        renameatx_np = libc.renameatx_np
+        renameatx_np.argtypes = [
+            ctypes.c_int, ctypes.c_char_p,
+            ctypes.c_int, ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameatx_np.restype = ctypes.c_int
+        result = renameatx_np(
+            src_fd, os.fsencode(src_name), dst_fd, os.fsencode(dst_name), _RENAME_EXCL
+        )
+    elif sys.platform.startswith("linux"):
+        libc = ctypes.CDLL(None, use_errno=True)
+        try:
+            renameat2 = libc.renameat2
+        except AttributeError:
+            raise OSError(errno.ENOTSUP, "atomic no-replace rename is unavailable")
+        renameat2.argtypes = [
+            ctypes.c_int, ctypes.c_char_p,
+            ctypes.c_int, ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameat2.restype = ctypes.c_int
+        result = renameat2(
+            src_fd, os.fsencode(src_name), dst_fd, os.fsencode(dst_name), 0x00000001
+        )
+    else:
+        raise OSError(errno.ENOTSUP, "atomic no-replace rename is unavailable")
+    if result:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), f"{src_name} -> {dst_name}")
+
+
+def _open_runtime_dir(path):
+    flags = getattr(os, "O_SEARCH", os.O_RDONLY)
+    flags |= getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    return os.open(path, flags)
+
+
+def _open_runtime_dir_at(parent_fd, name):
+    """Open a child directory through an already-anchored parent FD."""
+    flags = getattr(os, "O_SEARCH", os.O_RDONLY)
+    flags |= getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    return os.open(name, flags, dir_fd=parent_fd)
+
+
+def _new_recovery_journal(root_fd, skill):
+    """Create a private journal beneath an already-open runtime root FD."""
+    for _ in range(128):
+        name = f".skillbox-retire-{skill}-{secrets.token_hex(16)}"
+        try:
+            os.mkdir(name, 0o700, dir_fd=root_fd)
+            return name
+        except FileExistsError:
+            continue
+    raise OSError(errno.EEXIST, "could not reserve a unique recovery journal")
+
+
+def _journal_matches(root_fd, journal_name, journal_fd):
+    """True only while `journal_name` still names the held journal directory.
+
+    Holding a directory FD protects the eventual no-replace move from a
+    pathname substitution.  It does not make the human-readable pathname
+    immutable, though, so a caller may report that pathname only while its
+    directory entry is still the exact directory held by `journal_fd`.
+    """
+    try:
+        named = os.stat(journal_name, dir_fd=root_fd, follow_symlinks=False)
+        held = os.fstat(journal_fd)
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(named.st_mode)
+        and named.st_dev == held.st_dev
+        and named.st_ino == held.st_ino
+    )
+
+
+def _runtime_root_matches(root_path, root_fd):
+    """True only while the configured root path still names the held root FD."""
+    try:
+        named = os.stat(root_path, follow_symlinks=False)
+        held = os.fstat(root_fd)
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(named.st_mode)
+        and named.st_dev == held.st_dev
+        and named.st_ino == held.st_ino
+    )
+
+
+def _entry_present(dir_fd, name):
+    try:
+        os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        # A changed/unreadable entry is conservatively treated as occupied.
+        return True
+
+
+def _park_slot_noreplace(root_fd, skill, journal_fd):
+    """Park `skill` in an anchored journal, returning (raw_target, occupied)."""
+    _rename_noreplace_at(root_fd, skill, journal_fd, "mount")
+    try:
+        mode = os.stat("mount", dir_fd=journal_fd, follow_symlinks=False).st_mode
+        raw_target = os.readlink("mount", dir_fd=journal_fd) if stat.S_ISLNK(mode) else None
+    except OSError:
+        raw_target = None
+    return raw_target, _entry_present(root_fd, skill)
 
 
 def git_root(path):
@@ -277,6 +466,9 @@ def cmd_new(roots, sources, name, repo=None):
         sys.exit(f"unknown --repo {repo}; known: {', '.join(s['id'] for s in sources)}")
     if src.get("single_skill"):
         sys.exit(f"--repo {repo} is a single-skill source, not scaffoldable")
+    if name in src.get("exclude", frozenset()):
+        sys.exit(f"skill '{name}' is excluded by source '{repo}'; remove it from that "
+                 "source's exclude list before creating it")
     existing_src, _ = resolve(name, sources)
     if existing_src:
         sys.exit(f"skill '{name}' already exists in source '{existing_src['id']}'. "
@@ -466,6 +658,9 @@ def cmd_promote(roots, sources, name, to_id):
         sys.exit(f"--to {to_id} is a single-skill source, not a movable target")
     if tgt["id"] == src["id"]:
         sys.exit(f"{name} already lives in {to_id}")
+    if name in tgt.get("exclude", frozenset()):
+        sys.exit(f"cannot promote '{name}' to {to_id}: that source excludes it; remove the "
+                 "name from its exclude list first")
     new_path = tgt["path"] / name
     if new_path.exists():
         sys.exit(f"cannot promote: {new_path} already exists")
@@ -503,6 +698,165 @@ def cmd_rm(roots, skill):
             n += 1
     if not n:
         print(f"{skill}: no symlinks found in configured runtime slots")
+
+
+def cmd_retire(roots, sources, skill, source_id):
+    """Safely park a retired source leaf outside active runtime slots.
+
+    Unlike the deliberately broad `rm`, retirement proves that every parked
+    link still points to the selected source's archived leaf. It also refuses
+    if another active source would immediately take the name over on sync.
+    """
+    skill = require_name(skill)
+    if not source_id:
+        sys.exit("usage: skillbox retire <name> --source <source-id>")
+    src = next((s for s in sources if s["id"] == source_id), None)
+    if not src:
+        sys.exit(f"unknown --source {source_id}; known: {', '.join(s['id'] for s in sources)}")
+    if skill not in src.get("exclude", frozenset()):
+        sys.exit(f"cannot retire '{skill}' from {source_id}: add it to that source's exclude list first")
+    expected = source_skill_path(src, skill)
+    if not expected or not (expected / "SKILL.md").is_file():
+        sys.exit(f"cannot retire '{skill}' from {source_id}: its archived source leaf is missing")
+
+    active_owners = [s["id"] for s in sources if skill in source_skills(s)]
+    if active_owners:
+        sys.exit(f"cannot retire '{skill}': it still resolves from active source(s) "
+                 f"{', '.join(active_owners)}; exclude or rehome those copies first")
+
+    expected_resolved = expected.resolve()
+    removable, conflicts = [], []
+    for rname, root in roots.items():
+        if not root.is_dir():
+            continue
+        root_path = root.resolve(strict=False)
+        try:
+            root_fd = _open_runtime_dir(root_path)
+        except OSError as error:
+            conflicts.append(f"{rname} runtime root cannot be opened safely ({error})")
+            continue
+        try:
+            try:
+                mode = os.stat(skill, dir_fd=root_fd, follow_symlinks=False).st_mode
+            except FileNotFoundError:
+                os.close(root_fd)
+                continue
+            if not stat.S_ISLNK(mode):
+                conflicts.append(f"{rname}/{skill} is a real file or directory")
+                os.close(root_fd)
+                continue
+            raw_target = os.readlink(skill, dir_fd=root_fd)
+            candidate = Path(raw_target)
+            if not candidate.is_absolute():
+                candidate = root_path / candidate
+            actual = candidate.resolve(strict=False)
+            if actual != expected_resolved:
+                conflicts.append(f"{rname}/{skill} -> {raw_target}")
+                os.close(root_fd)
+                continue
+            removable.append((rname, root, root_path, root_fd, raw_target))
+        except OSError:
+            conflicts.append(f"{rname}/{skill} cannot resolve its symlink")
+            os.close(root_fd)
+    if conflicts:
+        for _, _, _, root_fd, _ in removable:
+            os.close(root_fd)
+        sys.exit(f"cannot retire '{skill}': refusing to park non-{source_id} slot(s): "
+                 + "; ".join(conflicts))
+
+    # A source replacement cannot be atomically compared with the preflight
+    # target, so this is deliberately a recoverable partial operation: a
+    # replaced source entry is captured, validated, retained, and reported.
+    # The final move itself is an OS no-replace rename between anchored parent
+    # FDs, so it never overwrites a recovery entry planted by another writer.
+    retained, failure = [], None
+    try:
+        for rname, root, root_path, root_fd, raw_target in removable:
+            if not _runtime_root_matches(root_path, root_fd):
+                failure = (f"runtime root for {root / skill} changed before parking; "
+                           "no runtime slot was moved")
+                break
+            journal_name = _new_recovery_journal(root_fd, skill)
+            archive = root_path / journal_name / "mount"
+            try:
+                journal_fd = _open_runtime_dir_at(root_fd, journal_name)
+            except OSError as error:
+                failure = f"could not open recovery journal for {root / skill}: {error}"
+                break
+            try:
+                # The no-replace move is FD-anchored, but this check is what
+                # makes the path in our receipt truthful.  If another process
+                # renames/replaces the journal, do not claim the old pathname
+                # can recover the held mount.
+                if not _runtime_root_matches(root_path, root_fd):
+                    failure = (f"runtime root for {root / skill} changed before parking; "
+                               "no runtime slot was moved")
+                    break
+                if not _journal_matches(root_fd, journal_name, journal_fd):
+                    failure = (f"recovery journal for {root / skill} changed before parking; "
+                               "no runtime slot was moved")
+                    break
+                try:
+                    captured_raw_target, source_reoccupied = _park_slot_noreplace(
+                        root_fd, skill, journal_fd
+                    )
+                except OSError as error:
+                    if (_runtime_root_matches(root_path, root_fd)
+                            and _journal_matches(root_fd, journal_name, journal_fd)):
+                        retained.append(archive)
+                        failure = f"could not park {root / skill}: {error}"
+                    else:
+                        failure = (f"runtime root or recovery journal for {root / skill} changed "
+                                   "while parking; the nominal recovery path is untrusted")
+                    break
+
+                if not _runtime_root_matches(root_path, root_fd):
+                    failure = (f"{root / skill} was parked, but its runtime root changed "
+                               "during retirement; the nominal recovery path is untrusted")
+                    break
+                if not _journal_matches(root_fd, journal_name, journal_fd):
+                    failure = (f"{root / skill} was parked, but its recovery journal changed "
+                               "during retirement; the nominal recovery path is untrusted")
+                    break
+
+                retained.append(archive)
+            finally:
+                os.close(journal_fd)
+
+            captured_expected = False
+            if captured_raw_target is not None:
+                captured_candidate = Path(captured_raw_target)
+                if not captured_candidate.is_absolute():
+                    captured_candidate = root_path / captured_candidate
+                captured_expected = (
+                    captured_raw_target == raw_target and
+                    captured_candidate.resolve(strict=False) == expected_resolved
+                )
+            if not captured_expected:
+                failure = (f"{root / skill} changed during retirement; its captured entry is "
+                           f"preserved in {journal_name}")
+                break
+            # A new entry can arrive immediately after the move.  Do not touch
+            # it or claim the host is retired; preserve the original archive.
+            if source_reoccupied or _entry_present(root_fd, skill):
+                failure = (f"{root / skill} changed during retirement; its source link is "
+                           f"preserved in {journal_name}")
+                break
+    finally:
+        for _, _, _, root_fd, _ in removable:
+            try:
+                os.close(root_fd)
+            except OSError:
+                pass
+
+    if failure:
+        held = "; ".join(str(archive) for archive in retained)
+        suffix = f"; verified recovery retained: {held}" if held else ""
+        sys.exit(f"cannot retire '{skill}' from {source_id}: {failure}{suffix}")
+
+    archives = "; ".join(str(archive) for archive in retained)
+    print(f"retired {skill} from {source_id}: parked {len(removable)} runtime slot(s) "
+          f"in hidden recovery folders: {archives}")
 
 
 def cmd_update(sources, dry):
@@ -1135,18 +1489,23 @@ def cmd_ui(roots, sources, port=8765, render_once=False):
     # forge a same-origin POST, so it cannot silently mutate the local fleet.
     token = secrets.token_urlsafe(16)
 
-    def fresh():  # re-read the manifest per request so source-add / external edits show live
+    def fresh(allow_stale=True):  # re-read manifest per request so external edits show live
         try:
             return load()
         except SystemExit:
-            return roots, sources  # keep last-good on a transiently-bad manifest
+            if allow_stale:
+                return roots, sources  # keep last-good only for read-only rendering
+            raise
 
-    def run_action(fn, *a, **kw):
+    def run_action(action):
         import io, contextlib
         buf = io.StringIO()
         try:
             with contextlib.redirect_stdout(buf):
-                fn(*a, **kw)
+                # Mutation and its manifest snapshot share one lock.  A UI
+                # request must not reuse a plan read before a retirement.
+                with mutation_lock():
+                    action()
             state["flash"], state["error"] = buf.getvalue().strip(), ""
         except SystemExit as e:
             state["error"] = str(e)
@@ -1209,33 +1568,26 @@ def cmd_ui(roots, sources, port=8765, render_once=False):
                 self.end_headers()
                 self.wfile.write(b"forbidden (csrf)")
                 return
-            r, s = fresh()
             if u.path == "/add" and "s" in q:
-                run_action(cmd_add, r, s, q["s"], q.get("src"))
+                def add_action():
+                    live_roots, live_sources = fresh(allow_stale=False)
+                    cmd_add(live_roots, live_sources, q["s"], q.get("src"))
+                run_action(add_action)
             elif u.path == "/rm" and "s" in q:
-                run_action(cmd_rm, r, q["s"])
+                def rm_action():
+                    live_roots, _ = fresh(allow_stale=False)
+                    cmd_rm(live_roots, q["s"])
+                run_action(rm_action)
             elif u.path == "/source-add" and q.get("id") and q.get("path"):
-                run_action(cmd_source_add, q["id"], q["path"])
+                run_action(lambda: cmd_source_add(q["id"], q["path"]))
             redirect(self)
 
     print(f"skillbox ui → http://127.0.0.1:{port} (Ctrl-C to stop)")
     HTTPServer(("127.0.0.1", port), H).serve_forever()
 
 
-def main():
-    args = sys.argv[1:]
-    if not args:
-        print(__doc__)
-        return
-    # Version is identity-only: no manifest, no home config, no fleet touch.
-    if args[0] == "--version":
-        print(f"skillbox {VERSION}")
-        return
-    if not MANIFEST.exists():
-        sys.exit(f"no manifest at {MANIFEST}\n"
-                 f"create it:  mkdir -p {MANIFEST.parent} && cp skills.toml.example {MANIFEST}\n"
-                 "then edit the [sources.*] paths to point at your skill repos.")
-    roots, sources = load()
+def _dispatch_command(args, roots, sources):
+    """Run one already-parsed command against one manifest snapshot."""
     cmd = args[0]
 
     def opt(flag):
@@ -1254,6 +1606,8 @@ def main():
         cmd_add(roots, sources, args[1], opt("--source"))
     elif cmd == "rm" and len(args) >= 2:
         cmd_rm(roots, args[1])
+    elif cmd == "retire" and len(args) >= 2:
+        cmd_retire(roots, sources, args[1], opt("--source"))
     elif cmd == "promote" and len(args) >= 2:
         cmd_promote(roots, sources, args[1], opt("--to"))
     elif cmd == "source" and args[1:2] == ["add"] and len(args) >= 4:
@@ -1290,6 +1644,34 @@ def main():
         cmd_ui(roots, sources, port, render_once="--render" in args)
     else:
         sys.exit(f"unknown or incomplete command: {' '.join(args)!r}\n{__doc__}")
+
+
+_MUTATING_COMMANDS = frozenset({
+    "new", "add", "rm", "retire", "promote", "source", "sync", "update",
+})
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        print(__doc__)
+        return
+    # Version is identity-only: no manifest, no home config, no fleet touch.
+    if args[0] == "--version":
+        print(f"skillbox {VERSION}")
+        return
+    if not MANIFEST.exists():
+        sys.exit(f"no manifest at {MANIFEST}\n"
+                 f"create it:  mkdir -p {MANIFEST.parent} && cp skills.toml.example {MANIFEST}\n"
+                 "then edit the [sources.*] paths to point at your skill repos.")
+    if args[0] in _MUTATING_COMMANDS:
+        # Acquire first, then take a fresh snapshot. Otherwise a command that
+        # waited behind `retire` could act on the manifest it read beforehand.
+        with mutation_lock():
+            roots, sources = load()
+            return _dispatch_command(args, roots, sources)
+    roots, sources = load()
+    return _dispatch_command(args, roots, sources)
 
 
 if __name__ == "__main__":
