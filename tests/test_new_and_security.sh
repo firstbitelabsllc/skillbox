@@ -65,4 +65,12 @@ sb_contains "default error names the missing 'personal' repo"    "$def_err" "per
 sb_ok       "no orphan scaffolded into team"    test ! -e "$SB_TMP/src/team/skills/orphan"
 sb_ok       "no orphan scaffolded into private" test ! -e "$SB_TMP/src/private/skills/orphan"
 
+# ── 6. A retired source name cannot be re-created into its own exclusion list ──
+perl -0pi -e 's/(\[sources\.private\]\npath = "[^"]+"\npriority = 2\n)/$1exclude = ["retired-alias"]\n/' \
+  "$SKILLBOX_MANIFEST"
+sb_fails "new refuses a name excluded by its target source" \
+  sb_skillbox new retired-alias --repo private
+sb_ok "excluded new leaves no unreachable folder behind" \
+  test ! -e "$SB_TMP/src/private/skills/retired-alias"
+
 sb_report

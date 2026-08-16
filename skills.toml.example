@@ -13,6 +13,10 @@ codex  = "~/.codex/skills"
 [sources.shared]
 path = "~/src/team-skills/skills"
 priority = 1
+# Keep a compatibility folder in the source tree without exposing it to any
+# runtime root. First run `skillbox retire legacy-alias --source shared`, then `sync --no-pull`
+# will not recreate it.
+# exclude = ["legacy-alias"]
 
 # Your own skills repo. `skillbox new` lands here by default
 # (override the default id with $SKILLBOX_DEFAULT_SOURCE).

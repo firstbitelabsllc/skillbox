@@ -66,6 +66,7 @@ skillbox list                       installed skills + the source repo each reso
 skillbox new <name> [--repo ID]     scaffold a new skill and link it into every runtime
 skillbox add <name> [--source ID]   link an existing source skill into every runtime
 skillbox rm <name>                  unlink any symlink in the named runtime slots; leave the source untouched
+skillbox retire <name> --source ID  safely unmount an excluded source leaf; refuses foreign/replacement links
 skillbox promote <name> --to ID     move a skill to another source repo and relink (reversible)
 skillbox promote <name> --to org    publish to your org's plugin marketplace (prints a DRAFT PR; never sends)
 skillbox scrub [--dry-run] [--json]   list KEEP-PRIVATE / *-leo skills that would leak on promote
@@ -90,6 +91,33 @@ A skill’s reach is simply **which source repo holds the folder**, shown as the
 
 Sources resolve in priority order; the first to define a name wins (a suffix like `-mine` lets you keep your own version of a shared skill). Run `skillbox doctor` any time to confirm every runtime is mounted consistently.
 
+To retire a compatibility alias without deleting its source folder, add an
+`exclude = ["old-alias"]` list to that source in `skills.toml`, run
+`skillbox retire old-alias --source <id>`, then run `skillbox sync --no-pull`.
+Excluded leaves are absent from `list`, `add`, and future sync plans, so sync
+will not recreate them. Retirement only parks slots that still point at that
+specific source leaf; it refuses real files, a different tool's symlink, or an
+active lower-priority copy that would otherwise take over the same name.
+Rather than deleting a mutable runtime link, `retire` parks each accepted link
+in a fresh hidden recovery folder within that same runtime root. The old route
+is no longer active, while its exact link remains recoverable; if anything
+changes mid-operation, Skillbox stops and prints the retained recovery path.
+It verifies that the named journal is still the exact directory it holds
+and that the runtime-root path still names its held directory before reporting
+that path; if another same-user process renames either one, it fails without
+claiming the stale location as a receipt. The cooperative lock serializes
+normal Skillbox writers, but no local tool can preserve a recovery link after a
+separate same-user process deletes it after retirement completes.
+Each normal mutating command takes one short cooperative lock before it reads
+the manifest, so a waiting `sync` cannot revive an alias retired by another
+Skillbox command. Retirement additionally uses the operating system's
+no-replace move primitive: a non-cooperating filesystem change is captured or
+refused and reported, never overwritten. Skillbox deliberately leaves hidden
+recovery journals behind on a failed retirement rather than racing a cleanup.
+Skillbox also refuses to create or promote a skill into a source that excludes
+its name. `rm` remains the deliberately broad manual unlink command. Exclusion
+is per source, so use `retire` to preflight every configured source before
+calling a route fully retired.
 ## Runtime roots
 
 | Root | Runtime |

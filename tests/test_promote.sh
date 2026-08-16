@@ -32,4 +32,15 @@ sb_fails "promote when target slot occupied refused" sb_skillbox promote shared 
 sb_fails "promote with no --to refused"             sb_skillbox promote gamma
 sb_fails "promote of unknown skill refused"         sb_skillbox promote nope --to team
 
+# A target source may deliberately keep a legacy folder archival-only. Promote
+# must refuse before moving anything into a folder that its own resolver hides.
+perl -0pi -e 's/(\[sources\.team\]\npath = "[^"]+"\npriority = 1\n)/$1exclude = ["gamma"]\n/' \
+  "$SKILLBOX_MANIFEST"
+sb_fails "promote refuses a name excluded by its target source" \
+  sb_skillbox promote gamma --to team
+sb_ok "excluded promote leaves gamma in its original source" \
+  test -f "$SB_TMP/src/private/skills/gamma/SKILL.md"
+sb_ok "excluded promote creates no hidden target folder" \
+  test ! -e "$SB_TMP/src/team/skills/gamma"
+
 sb_report
