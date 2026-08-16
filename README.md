@@ -187,9 +187,13 @@ will not recreate them. Retirement only parks slots that still point at that
 specific source leaf; it refuses real files, a different tool's symlink, or an
 active lower-priority copy that would otherwise take over the same name.
 Rather than deleting a mutable runtime link, `retire` parks each accepted link
-in a fresh hidden recovery folder within that same runtime root. The old route
-is no longer active, while its exact link remains recoverable; if anything
-changes mid-operation, Skillbox stops and prints the retained recovery path.
+in a fresh private hidden recovery folder alongside that runtime root, never
+beneath its active skill directory. The old route is no longer active, while
+its exact link remains recoverable without a recursive compatibility loader
+rediscovering it as a skill; if anything changes mid-operation, Skillbox stops
+and prints the retained recovery path. `sync --no-pull` also relocates any
+loadable journal made by the prior in-root layout, or refuses rather than
+claiming a clean runtime if it cannot verify that relocation.
 It verifies that the named journal is still the exact directory it holds
 and that the runtime-root path still names its held directory before reporting
 that path; if another same-user process renames either one, it fails without

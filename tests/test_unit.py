@@ -764,7 +764,7 @@ class SkillboxWorld(unittest.TestCase):
         for slot in slots[1:]:
             self.assertTrue(slot.is_symlink())
             self.assertEqual(slot.resolve(), target.resolve())
-        journals = list(slots[0].parent.glob(".skillbox-retire-beta-*"))
+        journals = list(slots[0].parent.parent.glob(".skillbox-retire-beta-*"))
         self.assertEqual(len(journals), 1)
         preserved = journals[0] / "mount"
         self.assertTrue(preserved.is_file())
@@ -838,11 +838,11 @@ class SkillboxWorld(unittest.TestCase):
 
         def move_journal_then_park(root_fd, skill, journal_fd):
             if not raced:
-                root = slots[0].parent
-                journals = list(root.glob(".skillbox-retire-beta-*"))
+                recovery_parent = slots[0].parent.parent
+                journals = list(recovery_parent.glob(".skillbox-retire-beta-*"))
                 self.assertEqual(len(journals), 1)
                 original = journals[0]
-                moved = root / f"{original.name}-moved"
+                moved = recovery_parent / f"{original.name}-moved"
                 os.rename(original, moved)
                 original.mkdir(mode=0o700)
                 raced.update(original=original, moved=moved)
@@ -893,10 +893,10 @@ class SkillboxWorld(unittest.TestCase):
 
         message = str(raised.exception)
         self.assertIn("nominal recovery path is untrusted", message)
-        journals = list(raced["moved"].glob(".skillbox-retire-beta-*"))
+        journals = list(raced["original"].parent.glob(".skillbox-retire-beta-*"))
         self.assertEqual(len(journals), 1)
         actual_archive = journals[0] / "mount"
-        self.assertNotIn(str(raced["original"] / journals[0].name / "mount"), message)
+        self.assertNotIn(str(journals[0] / "mount"), message)
         self.assertTrue(actual_archive.is_symlink())
         self.assertEqual(actual_archive.resolve(), target.resolve())
         self.assertFalse((raced["original"] / "beta").exists())
@@ -959,10 +959,10 @@ class SkillboxWorld(unittest.TestCase):
         for slot in slots[1:]:
             self.assertTrue(slot.is_symlink())
             self.assertEqual(slot.resolve(), target.resolve())
-        journals = list(slots[0].parent.glob(".skillbox-retire-beta-*"))
-        self.assertEqual(len(journals), 1)
-        self.assertTrue((journals[0] / "mount").is_symlink())
-        self.assertEqual((journals[0] / "mount").resolve(), target.resolve())
+        journals = list(slots[0].parent.parent.glob(".skillbox-retire-beta-*"))
+        parked = [journal / "mount" for journal in journals if (journal / "mount").is_symlink()]
+        self.assertEqual(len(parked), 1)
+        self.assertEqual(parked[0].resolve(), target.resolve())
 
     def test_cmd_retire_parks_relative_symlinks(self):
         # A valid source link may be relative to its runtime root. Moving it
@@ -985,16 +985,67 @@ class SkillboxWorld(unittest.TestCase):
             self.assertFalse(slot.exists())
             self.assertFalse(slot.is_symlink())
         # Do not use Path.rglob here: Python's recursive glob treatment of
-        # dot-prefixed journal folders differs across supported versions. Each
-        # runtime root has exactly one known hidden journal after this success.
-        parked = []
-        for root in self.roots_loaded.values():
-            journals = list(root.glob(".skillbox-retire-beta-*"))
-            self.assertEqual(len(journals), 1)
-            parked.append(journals[0] / "mount")
+        # dot-prefixed journal folders differs across supported versions. The
+        # hermetic roots intentionally share one recovery parent, so all four
+        # sibling journals are gathered from that known parent.
+        recovery_parent = next(iter(self.roots_loaded.values())).parent
+        journals = list(recovery_parent.glob(".skillbox-retire-beta-*"))
+        self.assertEqual(len(journals), len(slots))
+        parked = [journal / "mount" for journal in journals]
         self.assertEqual(len(parked), len(slots))
         self.assertTrue(all(path.is_symlink() for path in parked))
         self.assertEqual({os.readlink(path) for path in parked}, raw_targets)
+
+    def test_cmd_retire_parks_recovery_outside_the_runtime_skill_root(self):
+        # Compatibility loaders can recursively treat every SKILL.md beneath a
+        # runtime skill root as active, even inside a dot-prefixed directory.
+        # A retired link must therefore be preserved next to that root, never
+        # beneath it.
+        team = dict(self.sources[0], exclude=frozenset({"beta"}))
+        sources = [team, *self.sources[1:]]
+        target = self.team_dir / "beta"
+        slots = [root / "beta" for root in self.roots_loaded.values()]
+        for slot in slots:
+            slot.symlink_to(target)
+
+        with redirect_stdout(io.StringIO()):
+            sb.cmd_retire(self.roots_loaded, sources, "beta", "team")
+
+        for root in self.roots_loaded.values():
+            self.assertEqual(list(root.glob(".skillbox-retire-beta-*")), [])
+        # The hermetic roots intentionally share one parent; production roots
+        # normally do not. The recovery entries still need one sibling journal
+        # per retired runtime slot.
+        journals = list(next(iter(self.roots_loaded.values())).parent.glob(
+            ".skillbox-retire-beta-*"))
+        self.assertEqual(len(journals), len(self.roots_loaded))
+        for journal in journals:
+            archived = journal / "mount"
+            self.assertTrue(archived.is_symlink())
+            self.assertEqual(os.readlink(archived), str(target))
+
+    def test_sync_relocates_legacy_recovery_journal_outside_runtime_root(self):
+        # Existing versions parked journals inside a skill root. A normal
+        # no-pull sync must preserve that exact recovery link while moving it
+        # out of recursive compatibility discovery.
+        team = dict(self.sources[0], exclude=frozenset({"beta"}))
+        sources = [team, *self.sources[1:]]
+        root = self.roots_loaded["agents"]
+        target = self.team_dir / "beta"
+        journal = root / (".skillbox-retire-beta-" + "a" * 32)
+        journal.mkdir(mode=0o700)
+        (journal / "mount").symlink_to(target)
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            sb.cmd_sync(self.roots_loaded, sources, no_pull=True)
+
+        relocated = root.parent / journal.name / "mount"
+        self.assertFalse(journal.exists())
+        self.assertFalse(journal.is_symlink())
+        self.assertTrue(relocated.is_symlink())
+        self.assertEqual(os.readlink(relocated), str(target))
+        self.assertIn("recovery-migrated=1", output.getvalue())
 
     def test_prune_preserves_dangling_link_outside_configured_sources(self):
         foreign_parent = self.tmp / "foreign-source"
