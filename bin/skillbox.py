@@ -19,6 +19,7 @@ Commands:
   skillbox sync [--no-pull]          pull Git sources unless --no-pull; relink winners + prune
   skillbox update [--dry-run]        pull Git sources, or fetch-only preview with --dry-run
   skillbox ui [--port N] [--render]  localhost management GUI (127.0.0.1); --render prints one page and exits
+  skillbox --help | <command> --help show this help without reading the manifest or touching the fleet
 
 Manifest: ~/.skillbox/skills.toml  (override with $SKILLBOX_MANIFEST for tests).
 
@@ -1802,6 +1803,69 @@ _MUTATING_COMMANDS = frozenset({
     "new", "add", "rm", "retire", "promote", "source", "sync", "update",
 })
 
+_HELP_OPTIONS = frozenset({"--help", "-h"})
+
+# Manual dispatch must still have an explicit option contract.  Validate it
+# before manifest access or mutation-lock acquisition so a typo can never turn
+# a preview/help request into a real pull, relink, or manifest edit.
+_COMMAND_OPTIONS = {
+    ("list",): {},
+    ("new",): {"--repo": True},
+    ("add",): {"--source": True},
+    ("rm",): {},
+    ("retire",): {"--source": True},
+    ("promote",): {"--to": True},
+    ("source", "add"): {"--priority": True},
+    ("source", "rm"): {},
+    ("diff",): {},
+    ("log",): {},
+    ("scrub",): {"--to": True, "--dry-run": False, "--json": False},
+    ("doctor", "scrub"): {
+        "--to": True, "--dry-run": False, "--json": False,
+    },
+    ("doctor",): {"--json": False, "--strict": False},
+    ("audit",): {"--json": False, "--strict": False},
+    ("sync",): {"--no-pull": False},
+    ("update",): {"--dry-run": False},
+    ("ui",): {"--port": True, "--render": False, "--render-about": False},
+}
+
+
+def _command_key(args):
+    if args[0] == "source" and len(args) >= 2:
+        return ("source", args[1])
+    if args[0] == "doctor" and args[1:2] == ["scrub"]:
+        return ("doctor", "scrub")
+    return (args[0],)
+
+
+def _validate_cli_options(args):
+    """Reject unknown flags before any config, lock, source, or mount access."""
+    command = _command_key(args)
+    allowed = _COMMAND_OPTIONS.get(command)
+    if allowed is None:
+        sys.exit(f"unknown or incomplete command: {' '.join(args)!r}\n{__doc__}")
+
+    i = 1
+    while i < len(args):
+        token = args[i]
+        if token in _HELP_OPTIONS:
+            i += 1
+            continue
+        if token in allowed:
+            if not allowed[token]:
+                i += 1
+                continue
+            value_at = i + 1
+            if (value_at >= len(args) or args[value_at].startswith("--")
+                    or args[value_at] in _HELP_OPTIONS):
+                sys.exit(f"{token} needs a value")
+            i += 2
+            continue
+        if token.startswith("-"):
+            sys.exit(f"unknown option for {' '.join(command)}: {token}")
+        i += 1
+
 
 def main():
     args = sys.argv[1:]
@@ -1810,7 +1874,18 @@ def main():
         return
     # Version is identity-only: no manifest, no home config, no fleet touch.
     if args[0] == "--version":
+        if len(args) != 1:
+            sys.exit(f"unknown option for --version: {args[1]}")
         print(f"skillbox {VERSION}")
+        return
+    if args[0] in _HELP_OPTIONS:
+        if len(args) != 1:
+            sys.exit(f"unknown option for {args[0]}: {args[1]}")
+        print(__doc__)
+        return
+    _validate_cli_options(args)
+    if any(arg in _HELP_OPTIONS for arg in args[1:]):
+        print(__doc__)
         return
     if not MANIFEST.exists():
         sys.exit(f"no manifest at {MANIFEST}\n"
