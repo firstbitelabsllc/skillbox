@@ -22,6 +22,7 @@ import sys
 import io
 import json
 import shutil
+import subprocess
 import tempfile
 import importlib.util
 import unittest
@@ -114,6 +115,305 @@ class SkillboxWorld(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _git(self, root, *args):
+        return subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    def _git_source(self):
+        repo = self.tmp / "git-source"
+        skills = repo / "skills"
+        _write_skill(skills, "delta")
+        subprocess.run(
+            ["git", "init", "-b", "main", str(repo)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self._git(repo, "config", "user.name", "Skillbox Test")
+        self._git(repo, "config", "user.email", "skillbox@example.invalid")
+        self._git(repo, "add", "skills/delta/SKILL.md")
+        self._git(repo, "commit", "-m", "initial")
+        source = [{
+            "id": "delta",
+            "path": skills,
+            "priority": 1,
+            "single_skill": None,
+            "exclude": frozenset(),
+        }]
+        return repo, skills, source
+
+    def _tracked_git_source(self):
+        repo, skills, source = self._git_source()
+        remote = self.tmp / "source-remote.git"
+        subprocess.run(
+            ["git", "init", "--bare", str(remote)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self._git(repo, "remote", "add", "origin", str(remote))
+        self._git(repo, "push", "-u", "origin", "main")
+        return repo, skills, source, remote
+
+    def test_doctor_refuses_a_dirty_git_source(self):
+        _repo, skills, source = self._git_source()
+        (skills / "delta" / "SKILL.md").write_text("dirty\n")
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            result = sb.cmd_doctor(self.roots, source, as_json=True, strict=True)
+        payload = json.loads(output.getvalue())
+
+        self.assertEqual(result, 1)
+        self.assertIn("SOURCE-DIRTY", {p["kind"] for p in payload["problems"]})
+
+    def test_update_exits_nonzero_when_pull_fails(self):
+        _repo, skills, _source, remote = self._tracked_git_source()
+        remote.rename(self.tmp / "unreachable-pull-remote.git")
+        manifest = self.tmp / "update-skills.toml"
+        manifest.write_text(
+            "[roots]\n"
+            f'claude = "{self.roots["claude"]}"\n'
+            "\n[sources.delta]\n"
+            f'path = "{skills}"\n'
+            "priority = 1\n"
+        )
+        env = os.environ.copy()
+        env["SKILLBOX_MANIFEST"] = str(manifest)
+        env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+        result = subprocess.run(
+            [sys.executable, SKILLBOX_PY, "update"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("update failed", result.stdout)
+
+    def test_update_dry_run_exits_nonzero_when_fetch_fails(self):
+        _repo, skills, _source, remote = self._tracked_git_source()
+        remote.rename(self.tmp / "unreachable-source-remote.git")
+        manifest = self.tmp / "dry-update-skills.toml"
+        manifest.write_text(
+            "[roots]\n"
+            f'claude = "{self.roots["claude"]}"\n'
+            "\n[sources.delta]\n"
+            f'path = "{skills}"\n'
+            "priority = 1\n"
+        )
+        env = os.environ.copy()
+        env["SKILLBOX_MANIFEST"] = str(manifest)
+        env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+        result = subprocess.run(
+            [sys.executable, SKILLBOX_PY, "update", "--dry-run"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("update failed", result.stdout)
+
+    def test_sync_refuses_to_relink_after_a_source_update_failure(self):
+        with patch.object(sb, "cmd_update", return_value=1), \
+             patch.object(sb, "link_one") as link_one, \
+             patch.object(sb, "prune_dangling") as prune_dangling:
+            with self.assertRaisesRegex(SystemExit, "sync refused"):
+                sb.cmd_sync(self.roots, self.sources)
+
+        link_one.assert_not_called()
+        prune_dangling.assert_not_called()
+
+    def test_doctor_refuses_a_detached_git_source(self):
+        repo, _skills, source, _remote = self._tracked_git_source()
+        self._git(repo, "checkout", "--detach", "HEAD")
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            result = sb.cmd_doctor(self.roots, source, as_json=True, strict=True)
+        payload = json.loads(output.getvalue())
+
+        self.assertEqual(result, 1)
+        self.assertIn("SOURCE-DETACHED", {p["kind"] for p in payload["problems"]})
+
+    def test_doctor_refuses_a_source_ahead_of_its_upstream(self):
+        repo, skills, source, _remote = self._tracked_git_source()
+        (skills / "delta" / "SKILL.md").write_text("ahead\n")
+        self._git(repo, "add", "skills/delta/SKILL.md")
+        self._git(repo, "commit", "-m", "ahead")
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            result = sb.cmd_doctor(self.roots, source, as_json=True, strict=True)
+        payload = json.loads(output.getvalue())
+
+        self.assertEqual(result, 1)
+        self.assertIn("SOURCE-AHEAD", {p["kind"] for p in payload["problems"]})
+
+    def test_doctor_refuses_a_source_behind_its_upstream(self):
+        repo, _skills, source, remote = self._tracked_git_source()
+        publisher = self.tmp / "publisher"
+        subprocess.run(
+            ["git", "clone", "--branch", "main", str(remote), str(publisher)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self._git(publisher, "config", "user.name", "Skillbox Test")
+        self._git(publisher, "config", "user.email", "skillbox@example.invalid")
+        skill = publisher / "skills" / "delta" / "SKILL.md"
+        skill.write_text("behind\n")
+        self._git(publisher, "add", "skills/delta/SKILL.md")
+        self._git(publisher, "commit", "-m", "upstream")
+        self._git(publisher, "push", "origin", "main")
+        self._git(repo, "fetch", "origin")
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            result = sb.cmd_doctor(self.roots, source, as_json=True, strict=True)
+        payload = json.loads(output.getvalue())
+
+        self.assertEqual(result, 1)
+        self.assertIn("SOURCE-BEHIND", {p["kind"] for p in payload["problems"]})
+
+    def test_doctor_refuses_a_source_diverged_from_its_upstream(self):
+        repo, skills, source, remote = self._tracked_git_source()
+        (skills / "delta" / "SKILL.md").write_text("local\n")
+        self._git(repo, "add", "skills/delta/SKILL.md")
+        self._git(repo, "commit", "-m", "local")
+
+        publisher = self.tmp / "diverged-publisher"
+        subprocess.run(
+            ["git", "clone", "--branch", "main", str(remote), str(publisher)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self._git(publisher, "config", "user.name", "Skillbox Test")
+        self._git(publisher, "config", "user.email", "skillbox@example.invalid")
+        _write_skill(publisher / "skills", "epsilon")
+        self._git(publisher, "add", "skills/epsilon/SKILL.md")
+        self._git(publisher, "commit", "-m", "upstream")
+        self._git(publisher, "push", "origin", "main")
+        self._git(repo, "fetch", "origin")
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            result = sb.cmd_doctor(self.roots, source, as_json=True, strict=True)
+        payload = json.loads(output.getvalue())
+
+        self.assertEqual(result, 1)
+        self.assertIn("SOURCE-DIVERGED", {p["kind"] for p in payload["problems"]})
+
+    def test_doctor_refuses_a_linked_worktree_source(self):
+        repo, _skills, _source, _remote = self._tracked_git_source()
+        linked = self.tmp / "linked-source"
+        self._git(repo, "worktree", "add", "-b", "linked-source", str(linked), "HEAD")
+        source = [{
+            "id": "linked",
+            "path": linked / "skills",
+            "priority": 1,
+            "single_skill": None,
+            "exclude": frozenset(),
+        }]
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            result = sb.cmd_doctor(self.roots, source, as_json=True, strict=True)
+        payload = json.loads(output.getvalue())
+
+        self.assertEqual(result, 1)
+        self.assertIn("SOURCE-WORKTREE", {p["kind"] for p in payload["problems"]})
+
+    def test_doctor_refuses_a_missing_configured_source(self):
+        source = [{
+            "id": "missing",
+            "path": self.tmp / "does-not-exist" / "skills",
+            "priority": 1,
+            "single_skill": None,
+            "exclude": frozenset(),
+        }]
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            result = sb.cmd_doctor(self.roots, source, as_json=True, strict=True)
+        payload = json.loads(output.getvalue())
+
+        self.assertEqual(result, 1)
+        self.assertIn("SOURCE-MISSING", {p["kind"] for p in payload["problems"]})
+
+    def test_strict_doctor_refuses_non_git_sources_and_declared_shadows(self):
+        env = os.environ.copy()
+        env["SKILLBOX_MANIFEST"] = str(self.manifest)
+
+        result = subprocess.run(
+            [sys.executable, SKILLBOX_PY, "doctor", "--strict", "--json"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        payload = json.loads(result.stdout)
+        kinds = {problem["kind"] for problem in payload["problems"]}
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("SOURCE-NOT-GIT", kinds)
+        self.assertIn("SHADOWED", kinds)
+        self.assertGreaterEqual(payload["blocking"], 2)
+
+    def test_strict_doctor_refuses_a_source_without_an_upstream(self):
+        _repo, _skills, source = self._git_source()
+
+        output = io.StringIO()
+        with patch.object(sb, "other_skillbox_on_path", return_value=[]), \
+             redirect_stdout(output):
+            result = sb.cmd_doctor(self.roots, source, as_json=True, strict=True)
+        payload = json.loads(output.getvalue())
+
+        self.assertEqual(result, 1)
+        self.assertEqual(
+            [problem["kind"] for problem in payload["problems"]],
+            ["SOURCE-NO-UPSTREAM"],
+        )
+        self.assertEqual(payload["blocking"], 1)
+
+    def test_strict_doctor_refuses_an_unmanaged_runtime_skill(self):
+        _repo, skills, _source, _remote = self._tracked_git_source()
+        orphan = _write_skill(self.tmp / "outside", "orphan")
+        (self.roots["claude"] / "orphan").symlink_to(orphan)
+        manifest = self.tmp / "strict-unmanaged.toml"
+        manifest.write_text(
+            "[roots]\n"
+            f'claude = "{self.roots["claude"]}"\n'
+            "\n[sources.delta]\n"
+            f'path = "{skills}"\n'
+            "priority = 1\n"
+        )
+        env = os.environ.copy()
+        env["SKILLBOX_MANIFEST"] = str(manifest)
+        env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+        result = subprocess.run(
+            [sys.executable, SKILLBOX_PY, "doctor", "--strict", "--json"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        payload = json.loads(result.stdout)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(
+            [problem["kind"] for problem in payload["problems"]],
+            ["UNMANAGED"],
+        )
+        self.assertEqual(payload["blocking"], 1)
 
     # ── resolve_plan ─────────────────────────────────────────────────────────
     def test_resolve_plan_first_wins_winner(self):
@@ -643,6 +943,14 @@ class SkillboxWorld(unittest.TestCase):
         self.assertIn(b'class="srcbar"', out)
         self.assertIn(b'data-source=', out)
         self.assertIn(b'data-show="installed"', out)
+
+    def test_render_page_surfaces_strict_source_health(self):
+        state = {"flash": "", "error": ""}
+
+        out = sb.render_page(self.roots_loaded, self.sources, state)
+
+        self.assertIn(b"SOURCE-NOT-GIT", out)
+        self.assertIn(b"skillbox doctor --strict", out)
 
     # ── require_name (security: a name must be one safe path segment) ─────────
     def test_require_name_accepts_valid(self):
