@@ -141,6 +141,7 @@ calling a route fully retired.
 | Env var | Purpose |
 |---|---|
 | `SKILLBOX_MANIFEST` | path to the manifest (default `~/.skillbox/skills.toml`) |
+| `SKILLBOX_STATE_DIR` | runtime lock directory (default: the manifest directory); set this when the manifest is read from a source-controlled checkout |
 | `SKILLBOX_ORG_REPO` | `owner/repo` of your plugin marketplace for `promote --to org` |
 | `SKILLBOX_REPO_URL` | source URL shown on the GUI About page |
 | `SKILLBOX_DEFAULT_SOURCE` | default source id for `skillbox new` (default `personal`) |

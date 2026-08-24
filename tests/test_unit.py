@@ -222,6 +222,36 @@ class SkillboxWorld(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("update failed", result.stdout)
 
+    def test_runtime_state_directory_keeps_override_manifest_checkout_clean(self):
+        _repo, skills, _source, _remote = self._tracked_git_source()
+        manifest_dir = self.tmp / "canonical-checkout" / "host-directives"
+        manifest_dir.mkdir(parents=True)
+        manifest = manifest_dir / "skills.toml"
+        manifest.write_text(
+            "[roots]\n"
+            f'claude = "{self.roots["claude"]}"\n'
+            "\n[sources.delta]\n"
+            f'path = "{skills}"\n'
+            "priority = 1\n"
+        )
+        state_dir = self.tmp / "runtime-state"
+        state_dir.mkdir()
+        env = os.environ.copy()
+        env["SKILLBOX_MANIFEST"] = str(manifest)
+        env["SKILLBOX_STATE_DIR"] = str(state_dir)
+        env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+        result = subprocess.run(
+            [sys.executable, SKILLBOX_PY, "update", "--dry-run"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((state_dir / ".skillbox-mutation.lock").is_file())
+        self.assertFalse((manifest_dir / ".skillbox-mutation.lock").exists())
+
     def test_sync_refuses_to_relink_after_a_source_update_failure(self):
         with patch.object(sb, "cmd_update", return_value=1), \
              patch.object(sb, "link_one") as link_one, \

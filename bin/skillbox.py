@@ -42,9 +42,11 @@ VERSION = "1.0.0"
 
 # Config is overridable via $SKILLBOX_MANIFEST so the test harness can point at a
 # hermetic sandbox manifest (with fake roots + fake source repos) and never touch
-# the real fleet. The sources clone dir derives from its parent.
+# the real fleet. Mutation state normally lives beside the manifest; callers
+# reading a manifest from a source-controlled checkout can redirect that state
+# with $SKILLBOX_STATE_DIR so the checkout remains clean.
 MANIFEST = Path(os.environ.get("SKILLBOX_MANIFEST", str(Path.home() / ".skillbox" / "skills.toml")))
-CONFIG_DIR = MANIFEST.parent
+CONFIG_DIR = Path(os.environ.get("SKILLBOX_STATE_DIR", str(MANIFEST.parent))).expanduser()
 
 # `new` puts a skill in your own repo by default (first-wins overlay means a
 # shared same-name skill still wins unless you give yours a unique name, e.g. a
