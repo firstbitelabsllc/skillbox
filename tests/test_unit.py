@@ -160,6 +160,170 @@ class SkillboxWorld(unittest.TestCase):
         self._git(repo, "push", "-u", "origin", "main")
         return repo, skills, source, remote
 
+    def _advance_remote(self, remote):
+        publisher = self.tmp / "source-publisher"
+        subprocess.run(
+            ["git", "clone", "--branch", "main", str(remote), str(publisher)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self._git(publisher, "config", "user.name", "Skillbox Publisher")
+        self._git(publisher, "config", "user.email", "publisher@example.invalid")
+        skill = publisher / "skills" / "delta" / "SKILL.md"
+        skill.write_text(skill.read_text() + "remote change\n")
+        self._git(publisher, "add", "skills/delta/SKILL.md")
+        self._git(publisher, "commit", "-m", "remote change")
+        self._git(publisher, "push", "origin", "main")
+        return self._git(publisher, "rev-parse", "HEAD").stdout.strip()
+
+    def _cli_env(self, manifest, state_dir=None):
+        env = os.environ.copy()
+        env["SKILLBOX_MANIFEST"] = str(manifest)
+        if state_dir is not None:
+            env["SKILLBOX_STATE_DIR"] = str(state_dir)
+        env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+        return env
+
+    def test_help_is_read_only_before_manifest_or_lock(self):
+        manifest = self.tmp / "missing" / "skills.toml"
+        invocations = (
+            ["--help"],
+            ["-h"],
+            ["update", "--help"],
+            ["update", "-h"],
+        )
+        for invocation in invocations:
+            with self.subTest(invocation=invocation):
+                state_name = "state-" + "-".join(invocation).replace("--", "")
+                state_dir = self.tmp / state_name
+                result = subprocess.run(
+                    [sys.executable, SKILLBOX_PY, *invocation],
+                    capture_output=True,
+                    text=True,
+                    env=self._cli_env(manifest, state_dir),
+                )
+
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("skillbox update [--dry-run]", result.stdout)
+                self.assertFalse(manifest.exists())
+                self.assertFalse(state_dir.exists())
+
+    def test_top_level_identity_options_reject_trailing_flags(self):
+        manifest = self.tmp / "missing" / "skills.toml"
+        for identity in ("--help", "-h", "--version"):
+            with self.subTest(identity=identity):
+                state_dir = self.tmp / ("state-" + identity.lstrip("-"))
+                result = subprocess.run(
+                    [sys.executable, SKILLBOX_PY, identity, "--definitely-unknown"],
+                    capture_output=True,
+                    text=True,
+                    env=self._cli_env(manifest, state_dir),
+                )
+                output = result.stdout + result.stderr
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("unknown option", output)
+                self.assertIn("--definitely-unknown", output)
+                self.assertFalse(manifest.exists())
+                self.assertFalse(state_dir.exists())
+
+    def test_update_help_does_not_pull_an_ahead_remote(self):
+        repo, skills, _source, remote = self._tracked_git_source()
+        before = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+        remote_head = self._advance_remote(remote)
+        manifest = self.tmp / "help-skills.toml"
+        manifest.write_text(
+            "[roots]\n"
+            f'claude = "{self.roots["claude"]}"\n'
+            "\n[sources.delta]\n"
+            f'path = "{skills}"\n'
+            "priority = 1\n"
+        )
+        state_dir = self.tmp / "help-state"
+        state_dir.mkdir()
+
+        result = subprocess.run(
+            [sys.executable, SKILLBOX_PY, "update", "--help"],
+            capture_output=True,
+            text=True,
+            env=self._cli_env(manifest, state_dir),
+        )
+
+        after = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+        self.assertNotEqual(before, remote_head)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(after, before)
+        self.assertFalse((state_dir / ".skillbox-mutation.lock").exists())
+
+    def test_update_rejects_a_mistyped_option_before_pull_or_lock(self):
+        repo, skills, _source, remote = self._tracked_git_source()
+        before = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+        remote_head = self._advance_remote(remote)
+        manifest = self.tmp / "typo-skills.toml"
+        manifest.write_text(
+            "[roots]\n"
+            f'claude = "{self.roots["claude"]}"\n'
+            "\n[sources.delta]\n"
+            f'path = "{skills}"\n'
+            "priority = 1\n"
+        )
+        state_dir = self.tmp / "typo-state"
+        state_dir.mkdir()
+
+        result = subprocess.run(
+            [sys.executable, SKILLBOX_PY, "update", "--dryrun"],
+            capture_output=True,
+            text=True,
+            env=self._cli_env(manifest, state_dir),
+        )
+
+        after = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+        output = result.stdout + result.stderr
+        self.assertNotEqual(before, remote_head)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unknown option", output)
+        self.assertIn("--dryrun", output)
+        self.assertEqual(after, before)
+        self.assertFalse((state_dir / ".skillbox-mutation.lock").exists())
+
+    def test_every_command_rejects_unknown_options_before_manifest_access(self):
+        manifest = self.tmp / "absent" / "skills.toml"
+        commands = (
+            ["list"],
+            ["new", "alpha"],
+            ["add", "alpha"],
+            ["rm", "alpha"],
+            ["retire", "alpha"],
+            ["promote", "alpha"],
+            ["source", "add", "team", "/tmp/team"],
+            ["source", "rm", "team"],
+            ["diff", "alpha"],
+            ["log", "alpha"],
+            ["scrub"],
+            ["doctor", "scrub"],
+            ["doctor"],
+            ["audit"],
+            ["sync"],
+            ["update"],
+            ["ui"],
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                state_dir = self.tmp / ("state-" + "-".join(command[:2]))
+                result = subprocess.run(
+                    [sys.executable, SKILLBOX_PY, *command, "--definitely-unknown"],
+                    capture_output=True,
+                    text=True,
+                    env=self._cli_env(manifest, state_dir),
+                )
+                output = result.stdout + result.stderr
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("unknown option", output)
+                self.assertIn("--definitely-unknown", output)
+                self.assertFalse(state_dir.exists())
+
     def test_doctor_refuses_a_dirty_git_source(self):
         _repo, skills, source = self._git_source()
         (skills / "delta" / "SKILL.md").write_text("dirty\n")
