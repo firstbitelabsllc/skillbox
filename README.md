@@ -73,15 +73,24 @@ skillbox scrub [--dry-run] [--json]   list KEEP-PRIVATE / *-leo skills that woul
 skillbox scrub <name> --to ID         check one promote target; non-dry-run exits 1 if blocked
 skillbox source add <id> <path>     register a local source repo (e.g. a teammate's clone)
 skillbox diff <name> | log <name>   the skill folder's uncommitted diff / commit history
-skillbox doctor [--json]            check every mount across runtimes: BROKEN / MISSING / DRIFTED / SHADOWED / PATH-SHADOW
-skillbox sync [--no-pull]           pull Git sources by default, relink winners, and prune dangling links
-skillbox update [--dry-run]         pull Git sources; --dry-run fetches and previews SKILL.md diffs
+skillbox doctor [--json] [--strict] check mounts and Git source health; strict also refuses unmanaged/shadowed/non-Git sources
+skillbox sync [--no-pull]           pull Git sources by default, then relink/prune only if every update succeeds
+skillbox update [--dry-run]         pull Git sources; --dry-run fetches and previews SKILL.md diffs; failures exit nonzero
 skillbox ui [--port N]              localhost management GUI at 127.0.0.1
 ```
 
 Skillbox does not keep a provenance registry for runtime-root symlinks. `add` and `sync` may replace any symlink occupying a configured `<root>/<name>` slot when its target differs, and `rm` may unlink any symlink in the named slot. A real file or directory is refused and left untouched. `sync` prunes a dangling link only when its target is inside a configured source and the source parent still exists; unrelated dangling links in a runtime root are preserved.
 
 `update` and the default `sync` explicitly contact each configured Git source’s remote (`git pull --ff-only`). `update --dry-run` still runs `git fetch`, which can update remote-tracking refs, but does not change the source working tree. Use `sync --no-pull` for a local-only relink/prune pass. Skillbox has no background fetcher and no remote-catalog install path.
+
+`doctor` always refuses unsafe mount drift and reports source provenance as
+diagnostics. `doctor --strict` also refuses source states that cannot be
+fast-forwarded without judgment (missing, dirty, detached, linked-worktree,
+ahead, behind, or diverged clones), unmanaged runtime skills, same-name source
+shadows, non-Git sources, sources without an upstream, and another `skillbox`
+executable shadowing this one on `PATH`. Source checks are read-only and compare
+the current local upstream ref; run `update --dry-run` first when you need a
+fresh network observation.
 
 `promote --to org` emits a Claude Code plugin manifest into the skill folder and **prints** a draft marketplace registration plus a `gh pr create --draft` command for `$SKILLBOX_ORG_REPO`. It never opens, pushes, or publishes that PR — you review and run it yourself.
 

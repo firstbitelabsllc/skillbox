@@ -14,7 +14,7 @@ Commands:
   skillbox source add <id> <path>    add a local source repo (e.g. a teammate's clone); `source rm <id>` reverses
   skillbox diff <name>               the skill's uncommitted git diff (if its source repo has a .git)
   skillbox log <name>                the skill's commit history (recent versions of the folder)
-  skillbox doctor [--json]           drift/parity check across runtimes: BROKEN/MISSING/DRIFTED/SHADOWED/PATH-SHADOW
+  skillbox doctor [--json] [--strict] drift/parity + source health; strict refuses informational conflicts
   skillbox scrub [<name>] [--to ID] [--dry-run]  audit private boundaries (KEEP-PRIVATE / *-leo); block promote leaks
   skillbox sync [--no-pull]          pull Git sources unless --no-pull; relink winners + prune
   skillbox update [--dry-run]        pull Git sources, or fetch-only preview with --dry-run
@@ -70,6 +70,16 @@ _VALID_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # Private-boundary markers: skills carrying these must never promote to shared/org targets.
 _KEEP_PRIVATE_RE = re.compile(
     r"KEEP[- ]PRIVATE|keep-private\s*:\s*true|visibility\s*:\s*private", re.I)
+
+_BLOCKING_DOCTOR_KINDS = {
+    "BROKEN", "MISSING", "DRIFTED", "MISSING-ROOT", "PARITY", "OCCUPIED",
+}
+_STRICT_BLOCKING_DOCTOR_KINDS = _BLOCKING_DOCTOR_KINDS | {
+    "SOURCE-MISSING", "SOURCE-DIRTY", "SOURCE-DETACHED", "SOURCE-WORKTREE",
+    "SOURCE-AHEAD", "SOURCE-BEHIND", "SOURCE-DIVERGED",
+    "UNMANAGED", "SHADOWED", "PATH-SHADOW", "SOURCE-NOT-GIT",
+    "SOURCE-NO-UPSTREAM",
+}
 
 
 def require_name(name):
@@ -861,6 +871,7 @@ def cmd_retire(roots, sources, skill, source_id):
 
 def cmd_update(sources, dry):
     seen_roots = set()
+    failures = 0
     for src in sources:
         root = git_root(src["path"])
         if not root:
@@ -869,21 +880,49 @@ def cmd_update(sources, dry):
         if str(root) in seen_roots:
             continue
         seen_roots.add(str(root))
+        upstream = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--abbrev-ref",
+             "--symbolic-full-name", "@{u}"],
+            capture_output=True,
+            text=True,
+        )
+        if upstream.returncode != 0:
+            print(f"{src['id']}: no upstream, skipped")
+            continue
         if dry:
-            subprocess.run(["git", "-C", str(root), "fetch", "--quiet"], check=False)
+            fetched = subprocess.run(
+                ["git", "-C", str(root), "fetch", "--quiet"],
+                capture_output=True,
+                text=True,
+            )
+            if fetched.returncode != 0:
+                out = (fetched.stderr or fetched.stdout).strip()
+                print(f"{src['id']}: update failed: {out.splitlines()[-1] if out else 'git fetch failed'}")
+                failures += 1
+                continue
             r = subprocess.run(["git", "-C", str(root), "diff", "--stat", "HEAD..@{u}", "--", "*SKILL.md"],
                                capture_output=True, text=True)
-            print(f"{src['id']}: {r.stdout.strip() or 'up to date'}")
+            if r.returncode != 0:
+                out = (r.stderr or r.stdout).strip()
+                print(f"{src['id']}: update failed: {out.splitlines()[-1] if out else 'upstream comparison failed'}")
+                failures += 1
+            else:
+                print(f"{src['id']}: {r.stdout.strip() or 'up to date'}")
         else:
             r = subprocess.run(["git", "-C", str(root), "pull", "--ff-only"],
                                capture_output=True, text=True)
             out = (r.stdout or r.stderr).strip()
-            print(f"{src['id']}: {out.splitlines()[-1] if out else 'ok'}")
+            if r.returncode != 0:
+                print(f"{src['id']}: update failed: {out.splitlines()[-1] if out else 'git pull failed'}")
+                failures += 1
+            else:
+                print(f"{src['id']}: {out.splitlines()[-1] if out else 'ok'}")
+    return 1 if failures else 0
 
 
 def cmd_sync(roots, sources, no_pull=False):
-    if not no_pull:
-        cmd_update(sources, dry=False)
+    if not no_pull and cmd_update(sources, dry=False):
+        sys.exit("sync refused: one or more source updates failed")
     plan, _ = resolve_plan(sources)
     linked = relinked = 0
     for name, (src, path) in plan.items():
@@ -967,6 +1006,105 @@ def other_skillbox_on_path(path_env=None, me=None):
     return found
 
 
+def source_git_problems(sources):
+    """Return configured Git-source defects observable without network access."""
+    problems = []
+    seen = set()
+    for src in sources:
+        path = src["path"]
+        if not path.exists():
+            problems.append(("SOURCE-MISSING", src["id"], str(path)))
+            continue
+        root = git_root(path)
+        if not root:
+            problems.append((
+                "SOURCE-NOT-GIT",
+                src["id"],
+                f"{path} is not inside a Git clone",
+            ))
+            continue
+        key = str(root.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+
+        def git(*args):
+            return subprocess.run(
+                ["git", "-C", str(root), *args],
+                capture_output=True,
+                text=True,
+            )
+
+        branch = git("symbolic-ref", "--quiet", "--short", "HEAD")
+        if branch.returncode != 0 or not branch.stdout.strip():
+            head = git("rev-parse", "--short", "HEAD").stdout.strip() or "unknown"
+            problems.append((
+                "SOURCE-DETACHED",
+                src["id"],
+                f"{root} is detached at {head}; use a branch-backed canonical clone",
+            ))
+
+        git_dir = git("rev-parse", "--git-dir")
+        git_common = git("rev-parse", "--git-common-dir")
+        if git_dir.returncode == 0 and git_common.returncode == 0:
+            def resolved_git_path(value):
+                candidate = Path(value.strip())
+                if not candidate.is_absolute():
+                    candidate = root / candidate
+                return candidate.resolve()
+
+            if resolved_git_path(git_dir.stdout) != resolved_git_path(git_common.stdout):
+                problems.append((
+                    "SOURCE-WORKTREE",
+                    src["id"],
+                    f"{root} is a linked worktree; configure a normal canonical clone",
+                ))
+
+        status = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+        )
+        if status.returncode == 0 and status.stdout.strip():
+            problems.append((
+                "SOURCE-DIRTY",
+                src["id"],
+                f"{root} has uncommitted source changes",
+            ))
+
+        upstream = git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+        if upstream.returncode != 0:
+            problems.append((
+                "SOURCE-NO-UPSTREAM",
+                src["id"],
+                f"{root} has no configured upstream",
+            ))
+            continue
+        counts = git("rev-list", "--left-right", "--count", "HEAD...@{u}")
+        if counts.returncode != 0 or len(counts.stdout.split()) != 2:
+            problems.append((
+                "SOURCE-NO-UPSTREAM",
+                src["id"],
+                f"{root} upstream comparison failed",
+            ))
+            continue
+        ahead, behind = (int(value) for value in counts.stdout.split())
+        if ahead and behind:
+            kind = "SOURCE-DIVERGED"
+            detail = (f"{root} is {ahead} commit(s) ahead and {behind} behind "
+                      f"{upstream.stdout.strip()}")
+        elif ahead:
+            kind = "SOURCE-AHEAD"
+            detail = f"{root} is {ahead} commit(s) ahead of {upstream.stdout.strip()}"
+        elif behind:
+            kind = "SOURCE-BEHIND"
+            detail = f"{root} is {behind} commit(s) behind {upstream.stdout.strip()}"
+        else:
+            continue
+        problems.append((kind, src["id"], detail))
+    return problems
+
+
 def doctor_problems(roots, sources):
     """Return (problems, installed, collisions, parity). Pure — no printing."""
     plan, collisions = resolve_plan(sources)
@@ -1022,15 +1160,17 @@ def doctor_problems(roots, sources):
     return problems, installed, collisions, parity
 
 
-def cmd_doctor(roots, sources, as_json=False):
+def cmd_doctor(roots, sources, as_json=False, strict=False):
     problems, installed, collisions, parity = doctor_problems(roots, sources)
+    problems.extend(source_git_problems(sources))
     for peer in other_skillbox_on_path():
         problems.append((
             "PATH-SHADOW", "skillbox",
             f"another skillbox on PATH: {peer} — put this tool's dir first "
             f"(npm/Homebrew name collision)",
         ))
-    blocking = [p for p in problems if p[0] in ("BROKEN", "MISSING", "DRIFTED", "MISSING-ROOT", "PARITY", "OCCUPIED")]
+    blocking_kinds = _STRICT_BLOCKING_DOCTOR_KINDS if strict else _BLOCKING_DOCTOR_KINDS
+    blocking = [p for p in problems if p[0] in blocking_kinds]
     path_shadows = [p for p in problems if p[0] == "PATH-SHADOW"]
     if as_json:
         print(json.dumps({
@@ -1038,6 +1178,7 @@ def cmd_doctor(roots, sources, as_json=False):
             "skills_installed": len(installed),
             "problems": [{"kind": k, "where": w, "detail": d} for k, w, d in problems],
             "blocking": len(blocking),
+            "strict": strict,
             "parity": parity,
         }, indent=2))
     else:
@@ -1273,8 +1414,9 @@ def render_page(roots, sources, state, token=""):
     installed = {l.name for l in primary.iterdir() if is_installed_skill_link(l)} if primary.is_dir() else set()
     plan, collisions = resolve_plan(sources)
     problems, _, _, parity = doctor_problems(roots, sources)
+    problems.extend(source_git_problems(sources))
     blocking = [(k, w, d) for (k, w, d) in problems
-                if k in ("BROKEN", "MISSING", "DRIFTED", "MISSING-ROOT", "PARITY", "OCCUPIED")]
+                if k in _STRICT_BLOCKING_DOCTOR_KINDS]
     prob_by_name = {}
     for k, w, d in problems:
         prob_by_name.setdefault(w.split("/")[-1], set()).add(k)
@@ -1349,10 +1491,13 @@ def render_page(roots, sources, state, token=""):
     h.append('<header><h1>skillbox</h1><div class="sub">a toolbox for your AI skills · '
              '<a href="/about">how it works</a></div></header>')
     if blocking:
-        items = "; ".join(f"{escape(k)} {escape(w)}" for k, w, d in blocking[:4])
+        items = "; ".join(
+            f"{escape('DUPLICATE-NAME' if k == 'SHADOWED' else k)} {escape(w)}"
+            for k, w, d in blocking[:4]
+        )
         more = f" +{len(blocking) - 4} more" if len(blocking) > 4 else ""
         h.append(f'<div class="docstrip">&#9888; {len(blocking)} issue(s): {items}{more} · run '
-                 '<code>skillbox doctor</code></div>')
+                 '<code>skillbox doctor --strict</code></div>')
     if state["flash"]:
         h.append(f'<div class="note">{escape(state["flash"])}</div>')
     if state["error"]:
@@ -1628,11 +1773,16 @@ def _dispatch_command(args, roots, sources):
         sys.exit(cmd_scrub(sources, scrub_name, opt("--to"), dry_run="--dry-run" in args,
                            as_json="--json" in args))
     elif cmd in ("doctor", "audit"):
-        sys.exit(cmd_doctor(roots, sources, as_json="--json" in args))
+        sys.exit(cmd_doctor(
+            roots,
+            sources,
+            as_json="--json" in args,
+            strict="--strict" in args,
+        ))
     elif cmd == "sync":
         cmd_sync(roots, sources, no_pull="--no-pull" in args)
     elif cmd == "update":
-        cmd_update(sources, "--dry-run" in args)
+        sys.exit(cmd_update(sources, "--dry-run" in args))
     elif cmd == "ui":
         if "--render-about" in args:
             sys.stdout.buffer.write(render_about())

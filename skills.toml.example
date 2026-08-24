@@ -1,4 +1,7 @@
 # skillbox manifest — copy to ~/.skillbox/skills.toml and adjust paths.
+# For a fail-closed host contract, point every source at a clean, branch-backed
+# normal Git clone with an upstream, avoid duplicate skill names, and verify with
+# `skillbox update --dry-run && skillbox doctor --strict`.
 # Priority: lower number wins name collisions (first-wins overlay; earlier wins).
 # Roots: one per agent runtime. Codex reads ~/.agents/skills (canonical);
 # ~/.codex/skills is kept only for Cursor-compat / legacy and is NOT scanned by Codex.
