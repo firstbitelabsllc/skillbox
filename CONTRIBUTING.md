@@ -7,7 +7,7 @@ Thanks for helping improve Skillbox. Keep changes small, local-first, and covere
 - Python 3.11 or 3.12 (the CI-tested interpreters); older Python may work with `tomli` but is not tested
 - Bash
 - macOS or Linux (the suite is not claimed for Windows)
-- `git` and `curl` for scenarios that use them
+- `git` for source-backed scenarios
 
 ## Setup
 
@@ -35,7 +35,6 @@ One scenario:
 ```bash
 bash tests/test_smoke.sh
 bash tests/test_scrub.sh
-bash tests/test_gui_http.sh
 python3 tests/test_unit.py
 ```
 
@@ -50,7 +49,6 @@ Expectations:
 - **Name / path guards** — skill names become directory leaves and symlink names; keep the traversal wall intact.
 - **Mount helpers** — configured symlink slots have no ownership metadata, so any symlink there may be replaced or unlinked; never clobber a real file/dir or delete a source folder.
 - **Network verbs** — default `sync` and `update` may contact Git remotes; `update --dry-run` fetches, while `sync --no-pull` is the local-only path.
-- **UI mutations** — stay POST-only with CSRF + loopback Host checks.
 - **Private boundary** — `scrub` / promote guards for `KEEP-PRIVATE`, `.keep-private`, and `*-leo`.
 - **`promote --to org`** — draft print only; never auto-send.
 

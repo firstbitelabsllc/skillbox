@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Removed
+
+- Retired the localhost management GUI and `ui` command. The manifest-driven CLI remains the sole mount, source-precedence, repair, and health interface.
+
 ## [1.0.0] — 2026-07-29
 
 ### Added

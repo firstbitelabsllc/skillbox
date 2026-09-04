@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# test_git_view.sh — `skillbox diff/log`: read-only per-skill git view. CLI
-# coverage (dirty / clean-after-commit / non-git / not-found / never-writes) +
-# the lazy GUI placeholder. The live /gitinfo route is covered in test_gui_http.sh.
+# test_git_view.sh — `skillbox diff/log`: read-only per-skill git view. Covers
+# dirty / clean-after-commit / non-git / not-found / never-writes behavior.
 set -uo pipefail
 cd "$(dirname "$0")"
 source lib/sandbox.sh
@@ -40,13 +39,5 @@ sb_contains "log: non-git source reports cleanly"  "$(sb_skillbox log loose)"  "
 # unknown skill → refused (nonzero)
 sb_fails "diff of an unknown skill refused" sb_skillbox diff nope
 sb_fails "log of an unknown skill refused"  sb_skillbox log nope
-
-# GUI render carries the lazy git panel placeholder (content loads via /gitinfo on expand);
-# git must NOT run on full render — the dirty content must be absent from the static HTML.
-printf '\nT25 STATIC PROBE\n' >> "$SB_TMP/src/team/skills/beta/SKILL.md"
-page="$(sb_skillbox ui --render)"
-sb_contains "GUI detail has the lazy git panel" "$page" 'class="git" data-skill='
-case "$page" in *"T25 STATIC PROBE"*) _sb_fail "git ran eagerly on full render (dirty content leaked)" ;;
-  *) _sb_pass "git does not run on full render (lazy → instant page)" ;; esac
 
 sb_report

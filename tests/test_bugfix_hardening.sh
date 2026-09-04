@@ -8,11 +8,12 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 trap sb_teardown EXIT
 sb_setup
 
-# ── 0. Fresh fleet (nothing installed yet) — GUI render defaults + filter case ──
-# Run first, while no skill is mounted, so `installed` is genuinely empty.
-page="$(sb_skillbox ui --render)"
-sb_contains "empty-fleet GUI defaults to available" "$page" 'class="opt active" data-show="available"'
-sb_contains "filter lowercases the haystack"        "$page" 'toLowerCase().indexOf(flt)'
+# ── 0. CLI-only contract — the retired GUI must not survive as a help alias ──
+out="$(sb_skillbox ui --help 2>&1)"; rc=$?
+sb_eq       "retired ui command exits nonzero" "$([ $rc -ne 0 ] && echo nz || echo z)" "nz"
+sb_contains "retired ui command is unknown"    "$out" "unknown or incomplete"
+help="$(sb_skillbox --help)"
+case "$help" in *'skillbox ui '*) _sb_fail "help omits retired ui command";; *) _sb_pass "help omits retired ui command";; esac
 
 # ── 1. opt(): a trailing value-less flag is a clean usage error, NOT a traceback ──
 out="$(sb_skillbox new foo --repo 2>&1)"; rc=$?

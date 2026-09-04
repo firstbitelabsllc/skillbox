@@ -22,15 +22,6 @@ Skillbox is a local package manager for AI-agent skill folders. Sources are path
 - `sync --no-pull` skips the Git update and performs only local resolution, relinking, and pruning.
 - A mounted skill becomes immediately visible to the configured agent runtimes. Review the local source and its Git remote before mounting or updating it.
 
-## Localhost UI
-
-- `skillbox ui` binds to `127.0.0.1` only (not `0.0.0.0`).
-- Mutations are **POST-only**. Plain GET routes never change mounts.
-- Each server process embeds a CSRF token. POSTs without the matching token return `403`.
-- Same-origin and Host checks reject cross-origin POSTs and **DNS-rebinding** Hosts that are not `127.0.0.1` / `localhost`.
-
-Treat the UI as a convenience for the same trust boundary as your shell user. Do not expose the port through a reverse proxy or tunnel.
-
 ## Private-boundary scrub
 
 Before a skill leaves a private source, Skillbox blocks promote leaks:
@@ -47,4 +38,4 @@ Before a skill leaves a private source, Skillbox blocks promote leaks:
 
 ## Reporting issues
 
-If you find a mount, path, or UI boundary bug, open an issue on the canonical repository once it is public: <https://github.com/firstbitelabsllc/skillbox>. Do not attach private skill contents in the report.
+If you find a mount, path, network, or private-boundary bug, open an issue on the canonical repository once it is public: <https://github.com/firstbitelabsllc/skillbox>. Do not attach private skill contents in the report.
