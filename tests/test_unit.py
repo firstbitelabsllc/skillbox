@@ -10,7 +10,6 @@ pure functions directly:
   link_one          idempotent, trailing-slash-normalizing, refuses real files
   doctor_problems   induces BROKEN / MISSING / DRIFTED / PARITY
   skill_md_hash     differs on differing SKILL.md, matches on identical
-  render_page       returns bytes containing b"skillbox" and a skill name
 
 Every assertion is written so it would FAIL if the function regressed (we test
 real source targets, exact tuple kinds, exact return values — no tautologies).
@@ -306,7 +305,6 @@ class SkillboxWorld(unittest.TestCase):
             ["audit"],
             ["sync"],
             ["update"],
-            ["ui"],
         )
         for command in commands:
             with self.subTest(command=command):
@@ -1118,33 +1116,6 @@ class SkillboxWorld(unittest.TestCase):
         self.assertEqual(parity_probs, [("PARITY", "alpha")])
         # parity dict agrees alpha is inconsistent
         self.assertFalse(parity["alpha"]["consistent"])
-
-    # ── render_page ──────────────────────────────────────────────────────────
-    def test_render_page_bytes_and_skill_name(self):
-        # install gamma so it appears in the Installed pane too
-        sb.link_one(self.roots_loaded, "gamma", self.priv_dir / "gamma", quiet=True)
-        state = {"flash": "", "error": ""}
-        out = sb.render_page(self.roots_loaded, self.sources, state)
-        self.assertIsInstance(out, bytes)
-        # branding present
-        self.assertIn(b"skillbox", out)
-        # a real skill name from our world is rendered
-        self.assertIn(b"gamma", out)
-        self.assertIn(b"alpha", out)
-        # it is a full HTML document
-        self.assertIn(b"<!doctype html>", out)
-        # source rail + per-row source attribution drive the by-source filter
-        self.assertIn(b'class="srcbar"', out)
-        self.assertIn(b'data-source=', out)
-        self.assertIn(b'data-show="installed"', out)
-
-    def test_render_page_surfaces_strict_source_health(self):
-        state = {"flash": "", "error": ""}
-
-        out = sb.render_page(self.roots_loaded, self.sources, state)
-
-        self.assertIn(b"SOURCE-NOT-GIT", out)
-        self.assertIn(b"skillbox doctor --strict", out)
 
     # ── require_name (security: a name must be one safe path segment) ─────────
     def test_require_name_accepts_valid(self):

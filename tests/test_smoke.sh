@@ -58,20 +58,7 @@ sb_ok "rm shared" sb_skillbox rm shared
 sb_eq "shared unlinked from claude" "$([ -e "$SB_TMP/roots/claude/shared" ] && echo present || echo gone)" "gone"
 sb_eq "shared source still on disk" "$([ -f "$SB_TMP/src/team/skills/shared/SKILL.md" ] && echo present || echo gone)" "present"
 
-# 11. GUI renders (pure, no server) and shows skills + sources + shadow badge
-page="$(sb_skillbox ui --render)"
-sb_contains "GUI title" "$page" "<h1>skillbox</h1>"
-sb_contains "GUI has the source rail" "$page" 'class="srcbar"'
-sb_contains "GUI source rail lists a source (team)" "$page" 'data-src="team"'
-sb_contains "GUI has the installed/available/all toggle" "$page" 'data-show="installed"'
-sb_contains "GUI rows carry their source for filtering" "$page" 'data-source='
-sb_contains "GUI has the add-source form" "$page" 'action="/source-add"'
-sb_contains "GUI shows a skill" "$page" "alpha"
-sb_contains "GUI shows plain-language override indicator" "$page" "overrides"
-if printf '%s' "$page" | grep -qi 'shadow'; then _sb_fail "GUI still shows 'shadow' jargon (any case)"; else _sb_pass "GUI has no 'shadow' jargon anywhere"; fi
-sb_contains "GUI has the ●/○ legend" "$page" "installed &middot;"
-
-# 12. UNMANAGED: a skill symlinked into roots from outside any source repo is
+# 11. UNMANAGED: a skill symlinked into roots from outside any source repo is
 # surfaced (non-blocking), not mistaken for an OCCUPIED/blocking problem.
 mkdir -p "$SB_TMP/external/orphanx"
 printf -- '---\nname: orphanx\ndescription: not from any source\n---\n' > "$SB_TMP/external/orphanx/SKILL.md"
@@ -81,7 +68,7 @@ sb_eq "orphanx flagged UNMANAGED" \
   "$(printf '%s' "$um" | python3 -c 'import sys,json;print(sum(1 for p in json.load(sys.stdin)["problems"] if p["kind"]=="UNMANAGED" and p["where"]=="orphanx"))')" "1"
 sb_eq "UNMANAGED is non-blocking (doctor exits 0)" "$(sb_skillbox doctor >/dev/null 2>&1; echo $?)" "0"
 
-# 13. Dot-prefixed runtime helper symlinks are infrastructure, not skills.
+# 12. Dot-prefixed runtime helper symlinks are infrastructure, not skills.
 before_dot_count="$(printf '%s' "$um" | python3 -c 'import sys,json;print(json.load(sys.stdin)["skills_installed"])')"
 mkdir -p "$SB_TMP/system-helper"
 printf -- '---\nname: helper\ndescription: helper\n---\n' > "$SB_TMP/system-helper/SKILL.md"
@@ -91,14 +78,5 @@ sb_eq "dot helper is not counted as installed" \
   "$(printf '%s' "$dot_doc" | python3 -c 'import sys,json;print(json.load(sys.stdin)["skills_installed"])')" "$before_dot_count"
 sb_eq "dot helper is not flagged unmanaged" \
   "$(printf '%s' "$dot_doc" | python3 -c 'import sys,json;print(sum(1 for p in json.load(sys.stdin)["problems"] if p["where"]==".codex-system"))')" "0"
-
-# 14. In-GUI About page: TL;DR + one-boundary diagram + the real repo link
-about="$(sb_skillbox ui --render-about)"
-sb_contains "About: page titled how it works" "$about" "how it works"
-sb_contains "About: TL;DR names the SKILL.md unit" "$about" "SKILL.md"
-sb_contains "About: explains same-name overrides plainly" "$about" "overrides"
-sb_contains "About: ships an inline diagram" "$about" "<svg"
-sb_contains "About: diagram shows the Codex-canonical root" "$about" "~/.agents/skills"
-sb_contains "About: links the source repo" "$about" "https://github.com/firstbitelabsllc/skillbox"
 
 sb_report

@@ -21,10 +21,7 @@ sb_contains "manifest gained [sources.coworker]"              "$(cat "$SKILLBOX_
 sb_contains "manifest PRESERVED existing [sources.team]"   "$(cat "$SKILLBOX_MANIFEST")" "[sources.team]"
 sb_contains "manifest PRESERVED existing [sources.private]" "$(cat "$SKILLBOX_MANIFEST")" "[sources.private]"
 
-# resolve picks up coworker's skills, shown AVAILABLE in the rail — not auto-mounted
-page="$(sb_skillbox ui --render)"
-sb_contains "coworker-one resolves (available in the rail)" "$page" "coworker-one"
-sb_contains "rail lists the coworker source" "$page" 'data-src="coworker"'
+# Registering a source does not auto-mount any of its skills.
 sb_eq "coworker-one NOT auto-mounted into claude" \
   "$([ -e "$SB_TMP/roots/claude/coworker-one" ] && echo mounted || echo no)" "no"
 
@@ -35,6 +32,7 @@ sb_eq "coworker born lowest precedence (>10)" "$([ "${prio:-0}" -gt 10 ] && echo
 # selectively installable — the actual point of the flow
 sb_ok   "install just one coworker skill" sb_skillbox add coworker-one --source coworker
 sb_link "coworker-one mounts to the coworker source" "$SB_TMP/roots/claude/coworker-one" "$COWORKER/coworker-one"
+sb_contains "list attributes coworker-one to coworker" "$(sb_skillbox list)" "coworker"
 sb_eq   "coworker-two stays available (no bulk mount)" \
   "$([ -e "$SB_TMP/roots/claude/coworker-two" ] && echo mounted || echo no)" "no"
 
@@ -49,14 +47,16 @@ sb_fails "path with no skills refused" sb_skillbox source add empty "$SB_TMP/emp
 MATE="$SB_TMP/mate"; _sb_mkskill "$MATE/skills" mate-one
 out2="$(sb_skillbox source add mate "$MATE" 2>&1)"
 sb_contains "accepts a repo root with a skills/ subdir" "$out2" "added source 'mate'"
-sb_contains "mate-one resolves after repo-root add" "$(sb_skillbox ui --render)" "mate-one"
+sb_ok "mate-one resolves after repo-root add" sb_skillbox add mate-one --source mate
+sb_link "mate-one mounts from the repo-root source" "$SB_TMP/roots/claude/mate-one" "$MATE/skills/mate-one"
 
 # TOML-safe path writing: a valid local folder name with a quote must not corrupt the manifest
 QUOTED="$SB_TMP/quote\"repo"; _sb_mkskill "$QUOTED/skills" quoted-one
 outq="$(sb_skillbox source add quoted "$QUOTED" 2>&1)"; rcq=$?
 sb_eq "source add accepts a quoted local path" "$rcq" "0"
 sb_contains "quoted path is escaped in TOML" "$(cat "$SKILLBOX_MANIFEST")" 'quote\"repo'
-sb_contains "quoted-one resolves after quoted-path add" "$(sb_skillbox ui --render)" "quoted-one"
+sb_ok "quoted-one resolves after quoted-path add" sb_skillbox add quoted-one --source quoted
+sb_link "quoted-one mounts from the quoted-path source" "$SB_TMP/roots/claude/quoted-one" "$QUOTED/skills/quoted-one"
 
 # source rm reverses, preserving everything else (incl. a later-added source)
 sb_ok "source rm coworker" sb_skillbox source rm coworker

@@ -76,7 +76,6 @@ skillbox diff <name> | log <name>   the skill folder's uncommitted diff / commit
 skillbox doctor [--json] [--strict] check mounts and Git source health; strict also refuses unmanaged/shadowed/non-Git sources
 skillbox sync [--no-pull]           pull Git sources by default, then relink/prune only if every update succeeds
 skillbox update [--dry-run]         pull Git sources; --dry-run fetches and previews SKILL.md diffs; failures exit nonzero
-skillbox ui [--port N]              localhost management GUI at 127.0.0.1
 ```
 
 Skillbox does not keep a provenance registry for runtime-root symlinks. `add` and `sync` may replace any symlink occupying a configured `<root>/<name>` slot when its target differs, and `rm` may unlink any symlink in the named slot. A real file or directory is refused and left untouched. `sync` prunes a dangling link only when its target is inside a configured source and the source parent still exists; unrelated dangling links in a runtime root are preserved.
@@ -143,7 +142,6 @@ calling a route fully retired.
 | `SKILLBOX_MANIFEST` | path to the manifest (default `~/.skillbox/skills.toml`) |
 | `SKILLBOX_STATE_DIR` | runtime lock directory (default: the manifest directory); set this when the manifest is read from a source-controlled checkout |
 | `SKILLBOX_ORG_REPO` | `owner/repo` of your plugin marketplace for `promote --to org` |
-| `SKILLBOX_REPO_URL` | source URL shown on the GUI About page |
 | `SKILLBOX_DEFAULT_SOURCE` | default source id for `skillbox new` (default `personal`) |
 
 See [skills.toml.example](skills.toml.example) for the manifest shape. Sources are **local paths only**.
@@ -158,7 +156,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how to run individual scenarios.
 
 ## Security
 
-Local mounts, symlink name guards, localhost UI CSRF/DNS-rebinding walls, and private-boundary scrub — see [SECURITY.md](SECURITY.md).
+Local mounts, symlink name guards, explicit network verbs, and private-boundary scrub — see [SECURITY.md](SECURITY.md).
 
 ## License
 
