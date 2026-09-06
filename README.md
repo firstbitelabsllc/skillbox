@@ -1,30 +1,32 @@
 # Skillbox
 
-**Edit a skill once. Use it in Claude Code, Codex, and Cursor.**
+**Write a skill once. Every coding tool you use gets the same file.**
 
-If each coding tool has its own copy of your skills, one fix becomes several
-edits. Skillbox mounts the same local `SKILL.md` folder into each configured
-tool with symlinks. Your Git repository owns the source; every mount points
-back to it.
+I keep my agent skills (the `SKILL.md` folders Claude Code, Codex, and Cursor
+all read) in a Git repo. For a while each tool had its own copy, and every
+fix meant three edits and a forgotten one. Skillbox is the small Python
+script I wrote to stop that: it symlinks one source folder into each tool's
+skills directory, and `doctor` tells me when a link is broken or pointing
+somewhere stale.
 
 ```text
 your-skills/review/SKILL.md
-        ├── Claude Code → same folder
-        ├── Codex       → same folder
-        └── Cursor      → same folder
+        ├── ~/.claude/skills/review  → same folder
+        ├── ~/.agents/skills/review  → same folder   (Codex)
+        └── ~/.cursor/skills/review  → same folder
 ```
 
-Use it for skills you already keep locally. A small TOML file names the sources,
-host directories, and which source wins when names overlap. `doctor` shows
-broken links, missing mounts, and drift before you rely on them.
+A short TOML file names your source repos, the host directories, and which
+source wins when two define the same name. That's the whole product. No
+registry, no background fetcher, no model calls.
 
-Python 3.11 or 3.12 and Bash on macOS/Linux are the CI-tested combinations.
-Git is required for source updates. Windows is not currently tested.
+Tested on Python 3.11 and 3.12 with Bash on macOS and Linux. Git is needed
+for `update`. I haven't tried Windows.
 
-## Try it in a temporary folder
+## Try it without touching your real skills
 
-This example creates one skill and mounts it into two scratch directories.
-It does not touch your installed agent skills or call a model.
+This makes one skill and mounts it into two scratch folders. Nothing under
+your home directory changes.
 
 ```bash
 git clone https://github.com/firstbitelabsllc/skillbox.git
@@ -45,70 +47,65 @@ readlink "$skillbox_demo/claude/hello"
 readlink "$skillbox_demo/codex/hello"
 ```
 
-Both links should print the same source folder. Edit its `SKILL.md`; both
-mounts see the edit immediately. The temporary source is deliberately not a
-Git clone. For everyday use, point the manifest at your own durable clones.
+Both `readlink` lines print the same folder. Edit that `SKILL.md` and both
+mounts see it, because they are the same file. The demo source isn't a Git
+clone on purpose; for real use, point the manifest at your own repos.
 
-## Install for your coding tools
+## Install it for real
 
-From the Skillbox clone:
+From the clone:
 
 ```bash
 mkdir -p ~/.local/bin ~/.skillbox
 ln -s "$PWD/bin/skillbox.py" ~/.local/bin/skillbox
 export PATH="$HOME/.local/bin:$PATH"
-```
-
-The symlink command refuses an occupied destination. If you already have a
-manifest, edit it in place. Otherwise copy
-[skills.toml.example](skills.toml.example) to `~/.skillbox/skills.toml`.
-Replace its example source paths with your actual skill repositories before
-running these commands. Create any configured host directories that do not
-exist yet; Skillbox skips missing roots.
-
-```bash
+cp skills.toml.example ~/.skillbox/skills.toml   # then edit the paths
 skillbox sync --no-pull
 skillbox doctor
 ```
 
-`sync --no-pull` mounts local sources without updating Git. It may replace an
-existing symlink in a configured skill slot; it refuses a real file or folder.
-Review the configured roots first. `doctor --strict` also checks source Git
-health and rejects unmanaged or shadowed sources.
+Edit the example paths to your actual skill repos before `sync`. Create any
+host directory that doesn't exist yet; Skillbox skips missing roots rather
+than making them. `sync --no-pull` relinks without touching Git. It will
+replace a symlink already sitting in a skill slot, but it refuses to touch a
+real file or folder, so look at your roots first.
 
-If `doctor` is an unknown command, check `command -v skillbox`: an unrelated
-npm package has the same name. Put `~/.local/bin` first on `PATH`.
+If `skillbox doctor` says unknown command, run `command -v skillbox`. There
+is an unrelated npm package with the same name; put `~/.local/bin` first on
+your `PATH`.
 
-## Everyday commands
+## Day to day
 
-| Want to… | Run |
+| I want to… | I run |
 | --- | --- |
-| See each skill and its source | `skillbox list` |
-| Mount one existing skill | `skillbox add review --source personal` |
-| Create a skill in your source | `skillbox new review --repo personal` |
-| Check every mount | `skillbox doctor` |
-| Preview source updates | `skillbox update --dry-run` |
+| See every skill and where it comes from | `skillbox list` |
+| Mount a skill that already exists in a source | `skillbox add review --source personal` |
+| Start a new skill in my source repo | `skillbox new review --repo personal` |
+| Check every link | `skillbox doctor` |
+| See what a `git pull` on my sources would change | `skillbox update --dry-run` |
 | Relink without fetching | `skillbox sync --no-pull` |
 
-`update --dry-run` fetches Git refs. Default `sync` pulls source repositories;
-use `--no-pull` when you only want local mount repair.
+Plain `sync` pulls your source repos first. `doctor --strict` also refuses
+dirty, detached, or diverged sources and any skill sitting in a root that
+Skillbox doesn't manage.
 
-## Safety and contribution
+## What it doesn't do
 
-Skillbox manages symlinks, not skill trust. Review a source before mounting it.
-Its private-content markers help catch accidental promotion, but they are not
-a complete secret scanner. See [Security](SECURITY.md) for exact boundaries.
+Skillbox manages symlinks. It does not vet what's inside a skill. Read a
+source before you mount it. There's a `scrub` command that catches folders
+you've marked private so `promote` can't leak them, but that is a tripwire,
+not a secret scanner. [SECURITY.md](SECURITY.md) has the exact boundaries.
 
-Found a mount that behaves differently across tools? Open an
-[issue](https://github.com/firstbitelabsllc/skillbox/issues) with the smallest
-manifest that reproduces it, replacing personal paths with examples.
-[Contributing](CONTRIBUTING.md) covers the hermetic tests and focused changes.
+If a mount behaves differently in one tool than another, that's the bug I
+most want to hear about. Open an
+[issue](https://github.com/firstbitelabsllc/skillbox/issues) with the
+smallest manifest that shows it. Tests are hermetic and run with:
 
 ```bash
 bash tests/run_all.sh
 ```
 
-[MIT License](LICENSE).
+[Contributing](CONTRIBUTING.md) · [MIT](LICENSE)
 
 <details>
 <summary>Command details, source precedence, retirement, and uninstall</summary>
