@@ -395,22 +395,22 @@ def link_one(roots, name, path, quiet=False):
     return linked, relinked
 
 
-def _target_in_sources(link, target, sources):
-    """Return whether a link target is inside one of the configured sources."""
+def _target_source(link, target, sources):
+    """Return the configured source whose path contains a link target, else None."""
     candidate = Path(target)
     if not candidate.is_absolute():
         candidate = link.parent / candidate
     try:
         candidate = candidate.resolve(strict=False)
     except OSError:
-        return False
+        return None
     for src in sources:
         try:
             candidate.relative_to(src["path"].resolve(strict=False))
-            return True
+            return src
         except (OSError, ValueError):
             continue
-    return False
+    return None
 
 
 def prune_dangling(roots, sources, quiet=False):
@@ -424,15 +424,17 @@ def prune_dangling(roots, sources, quiet=False):
                 # Runtime roots are shared with other tools. Never unlink an
                 # unknown dangling symlink just because it happens to live
                 # beside Skillbox mounts.
-                if not _target_in_sources(link, target, sources):
+                src = _target_source(link, target, sources)
+                if src is None:
                     if not quiet:
                         print(f"keep {rname}/{link.name}: target is outside configured sources")
                     continue
                 # Only prune a genuinely-dead leaf (source dir present, skill folder
-                # gone). If the target's parent dir is absent the whole source just
-                # blinked out (unmounted / mid-move) — pruning then would silently
+                # gone). If the source's configured path is absent the whole source
+                # just blinked out (unmounted / mid-move) — pruning then would silently
                 # unlink every skill of that source and report a false-clean fleet.
-                if not Path(target).parent.exists():
+                # For a single-skill source the configured path IS the skill.
+                if not src["path"].exists():
                     if not quiet:
                         print(f"keep {rname}/{link.name}: source absent, not pruned (transient)")
                     continue
