@@ -1213,7 +1213,9 @@ def _resolve_source_path(path):
     """A source path points at a skills dir (subfolders each holding SKILL.md).
     Accept either that dir or a repo root containing a `skills/` subdir; return
     the dir that actually yields ≥1 skill, or None."""
-    p = Path(os.path.expanduser(path))
+    # Absolute, not resolved: the manifest is read from any working directory,
+    # but a user's symlinked source dir should stay spelled the way they gave it.
+    p = Path(os.path.expanduser(path)).absolute()
     if not p.is_dir():
         return None
     for cand in (p, p / "skills"):
