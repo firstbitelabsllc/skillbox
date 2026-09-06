@@ -786,7 +786,11 @@ def cmd_retire(roots, sources, skill, source_id):
                 failure = (f"runtime root for {root / skill} changed before parking; "
                            "no runtime slot was moved")
                 break
-            journal_name = _new_recovery_journal(root_fd, skill)
+            try:
+                journal_name = _new_recovery_journal(root_fd, skill)
+            except OSError as error:
+                failure = f"could not create a recovery journal for {root / skill}: {error}"
+                break
             archive = root_path / journal_name / "mount"
             try:
                 journal_fd = _open_runtime_dir_at(root_fd, journal_name)
