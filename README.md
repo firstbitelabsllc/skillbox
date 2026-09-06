@@ -1,36 +1,78 @@
 # Skillbox
 
-**Write a skill once. Every coding tool you use gets the same file.**
+**Write a skill once. Every coding tool you use reads the same folder.**
 
-I keep my agent skills (the `SKILL.md` folders Claude Code, Codex, and Cursor
-all read) in a Git repo. For a while each tool had its own copy, and every
-fix meant three edits and a forgotten one. Skillbox is the small Python
-script I wrote to stop that: it symlinks one source folder into each tool's
-skills directory, and `doctor` tells me when a link is broken or pointing
-somewhere stale.
+Real session, trimmed:
 
-```text
-your-skills/review/SKILL.md
-        ├── ~/.claude/skills/review  → same folder
-        ├── ~/.agents/skills/review  → same folder   (Codex)
-        └── ~/.cursor/skills/review  → same folder
+```console
+$ skillbox new hello --repo demo
+created …/source/hello/SKILL.md  (source: demo)
+linked claude/hello -> …/source/hello
+linked codex/hello -> …/source/hello
+mounted into 2 runtime root(s)
+
+$ skillbox list
+hello                            demo
+
+$ readlink …/claude/hello …/codex/hello
+…/source/hello
+…/source/hello
+
+$ rm -r …/source/hello && skillbox doctor
+UNMANAGED    hello  installed but no source repo owns it
+BROKEN       claude/hello  -> …/source/hello
+BROKEN       codex/hello  -> …/source/hello
+doctor: 2 blocking problem(s)
 ```
 
-A short TOML file names your source repos, the host directories, and which
-source wins when two define the same name. That's the whole product. No
-registry, no background fetcher, no model calls.
+Claude Code, Codex, and Cursor each read their own skills directory, so I
+had three copies and every fix missed one. Skillbox symlinks one source
+folder into each tool's directory; `doctor` says when a link is broken or
+stale. That's the product.
 
-Tested on Python 3.11 and 3.12 with Bash on macOS and Linux. Git is needed
-for `update`. I haven't tried Windows.
+[Install](#install) · [Try it](#try-it) ·
+[Commands](#verbs) ·
+[Security](SECURITY.md) · [Issues](https://github.com/firstbitelabsllc/skillbox/issues)
 
-## Try it without touching your real skills
+<p align="center">
+  <a href="https://github.com/firstbitelabsllc/skillbox/actions/workflows/ci.yml"><img src="https://github.com/firstbitelabsllc/skillbox/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
+  <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+" />
+  <img src="https://img.shields.io/badge/daemon-none-success" alt="No daemon" />
+</p>
 
-This makes one skill and mounts it into two scratch folders. Nothing under
-your home directory changes.
+## Four words
+
+- **source**: a folder of `SKILL.md` folders, usually a Git clone.
+- **root**: a tool's skills directory, like `~/.claude/skills`.
+- **manifest**: `~/.skillbox/skills.toml`: sources, roots, and which source
+  wins a name.
+- **doctor**: read-only link check; nonzero exit on a broken, drifted, or
+  blocked mount.
+
+## Install
+
+Python 3.11+, Bash, macOS or Linux. Git for `update`.
 
 ```bash
 git clone https://github.com/firstbitelabsllc/skillbox.git
 cd skillbox
+mkdir -p ~/.local/bin ~/.skillbox
+ln -s "$PWD/bin/skillbox.py" ~/.local/bin/skillbox
+export PATH="$HOME/.local/bin:$PATH"
+cp skills.toml.example ~/.skillbox/skills.toml   # then edit the paths
+skillbox sync --no-pull
+skillbox doctor
+```
+
+Unknown command? An npm package shares the name; put `~/.local/bin` first
+on `PATH`.
+
+## Try it
+
+One skill, two scratch roots, nothing under `~` changes:
+
+```bash
 skillbox_demo=$(mktemp -d)
 mkdir -p "$skillbox_demo/claude" "$skillbox_demo/codex"
 cat > "$skillbox_demo/skills.toml" <<EOF
@@ -41,69 +83,35 @@ codex = "$skillbox_demo/codex"
 path = "$skillbox_demo/source"
 priority = 1
 EOF
-SKILLBOX_MANIFEST="$skillbox_demo/skills.toml" python3 bin/skillbox.py new hello --repo demo
-SKILLBOX_MANIFEST="$skillbox_demo/skills.toml" python3 bin/skillbox.py list
-readlink "$skillbox_demo/claude/hello"
-readlink "$skillbox_demo/codex/hello"
+export SKILLBOX_MANIFEST="$skillbox_demo/skills.toml"
+skillbox new hello --repo demo
+skillbox list
+readlink "$skillbox_demo/claude/hello" "$skillbox_demo/codex/hello"
+rm -r "$skillbox_demo/source/hello" && skillbox doctor
 ```
 
-Both `readlink` lines print the same folder. Edit that `SKILL.md` and both
-mounts see it, because they are the same file. The demo source isn't a Git
-clone on purpose; for real use, point the manifest at your own repos.
+The demo source has no Git, so `doctor` adds a `SOURCE-NOT-GIT` line.
 
-## Install it for real
+## Why not…
 
-From the clone:
+| | |
+|---|---|
+| Copy into each tool | copies drift; the edited one isn't the one read |
+| `ln -s` by hand | nothing tells you when a folder moves |
+| A marketplace | someone else's registry; this links what's on disk |
 
-```bash
-mkdir -p ~/.local/bin ~/.skillbox
-ln -s "$PWD/bin/skillbox.py" ~/.local/bin/skillbox
-export PATH="$HOME/.local/bin:$PATH"
-cp skills.toml.example ~/.skillbox/skills.toml   # then edit the paths
-skillbox sync --no-pull
-skillbox doctor
-```
+## Not built, on purpose
 
-Edit the example paths to your actual skill repos before `sync`. Create any
-host directory that doesn't exist yet; Skillbox skips missing roots rather
-than making them. `sync --no-pull` relinks without touching Git. It will
-replace a symlink already sitting in a skill slot, but it refuses to touch a
-real file or folder, so look at your roots first.
+No registry, no fetcher, no model calls, no Windows. It doesn't vet a
+skill's contents; read a source before you mount it. `scrub` blocks
+`promote` on folders marked private: a tripwire, not a scanner.
+[SECURITY.md](SECURITY.md) has the boundaries.
 
-If `skillbox doctor` says unknown command, run `command -v skillbox`. There
-is an unrelated npm package with the same name; put `~/.local/bin` first on
-your `PATH`.
+## Feedback
 
-## Day to day
-
-| I want to… | I run |
-| --- | --- |
-| See every skill and where it comes from | `skillbox list` |
-| Mount a skill that already exists in a source | `skillbox add review --source personal` |
-| Start a new skill in my source repo | `skillbox new review --repo personal` |
-| Check every link | `skillbox doctor` |
-| See what a `git pull` on my sources would change | `skillbox update --dry-run` |
-| Relink without fetching | `skillbox sync --no-pull` |
-
-Plain `sync` pulls your source repos first. `doctor --strict` also refuses
-dirty, detached, or diverged sources and any skill sitting in a root that
-Skillbox doesn't manage.
-
-## What it doesn't do
-
-Skillbox manages symlinks. It does not vet what's inside a skill. Read a
-source before you mount it. There's a `scrub` command that catches folders
-you've marked private so `promote` can't leak them, but that is a tripwire,
-not a secret scanner. [SECURITY.md](SECURITY.md) has the exact boundaries.
-
-If a mount behaves differently in one tool than another, that's the bug I
-most want to hear about. Open an
-[issue](https://github.com/firstbitelabsllc/skillbox/issues) with the
-smallest manifest that shows it. Tests are hermetic and run with:
-
-```bash
-bash tests/run_all.sh
-```
+A mount that behaves differently in one tool than another is the bug I most
+want. Open an [issue](https://github.com/firstbitelabsllc/skillbox/issues)
+with the smallest manifest that shows it. Tests: `bash tests/run_all.sh`.
 
 [Contributing](CONTRIBUTING.md) · [MIT](LICENSE)
 
@@ -150,7 +158,7 @@ skillbox sync [--no-pull]           pull Git sources by default, then relink/pru
 skillbox update [--dry-run]         pull Git sources; --dry-run fetches and previews SKILL.md diffs; failures exit nonzero
 ```
 
-Skillbox does not keep a provenance registry for runtime-root symlinks. `add` and `sync` may replace any symlink occupying a configured `<root>/<name>` slot when its target differs, and `rm` may unlink any symlink in the named slot. A real file or directory is refused and left untouched. `sync` prunes a dangling link only when its target is inside a configured source and the source parent still exists; unrelated dangling links in a runtime root are preserved.
+Skillbox does not keep a provenance registry for runtime-root symlinks. `add` and `sync` may replace any symlink occupying a configured `<root>/<name>` slot when its target differs, and `rm` may unlink any symlink in the named slot. A real file or directory is refused and left untouched. `sync` prunes a dangling link only when its target is inside a configured source and that source's configured path still exists; unrelated dangling links in a runtime root are preserved.
 
 `update` and the default `sync` explicitly contact each configured Git source’s remote (`git pull --ff-only`). `update --dry-run` still runs `git fetch`, which can update remote-tracking refs, but does not change the source working tree. Use `sync --no-pull` for a local-only relink/prune pass. Skillbox has no background fetcher and no remote-catalog install path.
 

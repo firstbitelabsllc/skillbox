@@ -395,22 +395,22 @@ def link_one(roots, name, path, quiet=False):
     return linked, relinked
 
 
-def _target_in_sources(link, target, sources):
-    """Return whether a link target is inside one of the configured sources."""
+def _target_source(link, target, sources):
+    """Return the configured source whose path contains a link target, else None."""
     candidate = Path(target)
     if not candidate.is_absolute():
         candidate = link.parent / candidate
     try:
         candidate = candidate.resolve(strict=False)
     except OSError:
-        return False
+        return None
     for src in sources:
         try:
             candidate.relative_to(src["path"].resolve(strict=False))
-            return True
+            return src
         except (OSError, ValueError):
             continue
-    return False
+    return None
 
 
 def prune_dangling(roots, sources, quiet=False):
@@ -424,15 +424,17 @@ def prune_dangling(roots, sources, quiet=False):
                 # Runtime roots are shared with other tools. Never unlink an
                 # unknown dangling symlink just because it happens to live
                 # beside Skillbox mounts.
-                if not _target_in_sources(link, target, sources):
+                src = _target_source(link, target, sources)
+                if src is None:
                     if not quiet:
                         print(f"keep {rname}/{link.name}: target is outside configured sources")
                     continue
                 # Only prune a genuinely-dead leaf (source dir present, skill folder
-                # gone). If the target's parent dir is absent the whole source just
-                # blinked out (unmounted / mid-move) — pruning then would silently
+                # gone). If the source's configured path is absent the whole source
+                # just blinked out (unmounted / mid-move) — pruning then would silently
                 # unlink every skill of that source and report a false-clean fleet.
-                if not Path(target).parent.exists():
+                # For a single-skill source the configured path IS the skill.
+                if not src["path"].exists():
                     if not quiet:
                         print(f"keep {rname}/{link.name}: source absent, not pruned (transient)")
                     continue
@@ -784,7 +786,11 @@ def cmd_retire(roots, sources, skill, source_id):
                 failure = (f"runtime root for {root / skill} changed before parking; "
                            "no runtime slot was moved")
                 break
-            journal_name = _new_recovery_journal(root_fd, skill)
+            try:
+                journal_name = _new_recovery_journal(root_fd, skill)
+            except OSError as error:
+                failure = f"could not create a recovery journal for {root / skill}: {error}"
+                break
             archive = root_path / journal_name / "mount"
             try:
                 journal_fd = _open_runtime_dir_at(root_fd, journal_name)
@@ -949,6 +955,8 @@ def owner_of(target, sources, plan, name):
 
 def cmd_list(roots, sources):
     plan, _ = resolve_plan(sources)
+    if not roots:
+        sys.exit(f"manifest {MANIFEST} has no runtime roots under [roots] — see skills.toml.example")
     root = next(iter(roots.values()))
     if not root.is_dir():
         sys.exit(f"primary root missing: {root}")
@@ -1211,7 +1219,9 @@ def _resolve_source_path(path):
     """A source path points at a skills dir (subfolders each holding SKILL.md).
     Accept either that dir or a repo root containing a `skills/` subdir; return
     the dir that actually yields ≥1 skill, or None."""
-    p = Path(os.path.expanduser(path))
+    # Absolute, not resolved: the manifest is read from any working directory,
+    # but a user's symlinked source dir should stay spelled the way they gave it.
+    p = Path(os.path.expanduser(path)).absolute()
     if not p.is_dir():
         return None
     for cand in (p, p / "skills"):
@@ -1351,7 +1361,11 @@ def _dispatch_command(args, roots, sources):
         cmd_promote(roots, sources, args[1], opt("--to"))
     elif cmd == "source" and args[1:2] == ["add"] and len(args) >= 4:
         p = opt("--priority")
-        cmd_source_add(args[2], args[3], int(p) if p else None)
+        try:
+            priority = int(p) if p else None
+        except ValueError:
+            sys.exit(f"--priority needs an integer, got {p!r}")
+        cmd_source_add(args[2], args[3], priority)
     elif cmd == "source" and args[1:2] == ["rm"] and len(args) >= 3:
         cmd_source_rm(args[2])
     elif cmd == "diff" and len(args) >= 2:
