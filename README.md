@@ -1,42 +1,117 @@
-# skillbox
+# Skillbox
 
-One reviewed `SKILL.md` source, mounted into **Claude Code**, **Codex**, and **Cursor** without copying.
+**Edit a skill once. Use it in Claude Code, Codex, and Cursor.**
 
-Skillbox symlink-fans a single local skill folder into each agent runtime root. Edit the source once; every runtime sees the same file. No reinstall, no duplicate trees.
+If each coding tool has its own copy of your skills, one fix becomes several
+edits. Skillbox mounts the same local `SKILL.md` folder into each configured
+tool with symlinks. Your Git repository owns the source; every mount points
+back to it.
 
+```text
+your-skills/review/SKILL.md
+        ├── Claude Code → same folder
+        ├── Codex       → same folder
+        └── Cursor      → same folder
 ```
-  ~/src/my-skills/skills/deploy/SKILL.md     (one source of truth)
-              │
-              │  absolute symlinks (no copy)
-              ▼
-  ~/.claude/skills/deploy  →  Claude Code
-  ~/.agents/skills/deploy  →  Codex
-  ~/.cursor/skills/deploy  →  Cursor
-```
 
-Local-first: sources are paths already on disk. Skillbox never stores a “tier” flag and never copies a skill folder into a runtime.
+Use it for skills you already keep locally. A small TOML file names the sources,
+host directories, and which source wins when names overlap. `doctor` shows
+broken links, missing mounts, and drift before you rely on them.
 
-**Tested platforms:** Python 3.11 and 3.12 / Bash on macOS and Linux. Windows is not claimed or tested.
+Python 3.11 or 3.12 and Bash on macOS/Linux are the CI-tested combinations.
+Git is required for source updates. Windows is not currently tested.
 
-## Install
+## Try it in a temporary folder
+
+This example creates one skill and mounts it into two scratch directories.
+It does not touch your installed agent skills or call a model.
 
 ```bash
 git clone https://github.com/firstbitelabsllc/skillbox.git
 cd skillbox
-mkdir -p ~/.local/bin ~/.skillbox \
-  ~/.claude/skills ~/.agents/skills ~/.cursor/skills ~/.codex/skills
-ln -s "$PWD/bin/skillbox.py" ~/.local/bin/skillbox  # fails safely if occupied
-# ~/.local/bin must be *before* Homebrew/npm bins on $PATH — an unrelated
-# npm package also named `skillbox` ships `doctor`-less commands.
-export PATH="$HOME/.local/bin:$PATH"
-cp skills.toml.example ~/.skillbox/skills.toml   # keep [roots]; edit [sources.*] paths
-command -v skillbox   # should resolve to .../skillbox.py
-skillbox doctor       # run from anywhere
+skillbox_demo=$(mktemp -d)
+mkdir -p "$skillbox_demo/claude" "$skillbox_demo/codex"
+cat > "$skillbox_demo/skills.toml" <<EOF
+[roots]
+claude = "$skillbox_demo/claude"
+codex = "$skillbox_demo/codex"
+[sources.demo]
+path = "$skillbox_demo/source"
+priority = 1
+EOF
+SKILLBOX_MANIFEST="$skillbox_demo/skills.toml" python3 bin/skillbox.py new hello --repo demo
+SKILLBOX_MANIFEST="$skillbox_demo/skills.toml" python3 bin/skillbox.py list
+readlink "$skillbox_demo/claude/hello"
+readlink "$skillbox_demo/codex/hello"
 ```
 
-The documented, CI-tested path is Python 3.11 or 3.12, using the standard-library `tomllib`. Older Python may work with `pip install tomli`, but is not tested. Git is required for the clone and for `diff`, `log`, `update`, and the default `sync`; the local mount commands otherwise use Python’s standard library. Bash is used by the test suite and shell examples.
+Both links should print the same source folder. Edit its `SKILL.md`; both
+mounts see the edit immediately. The temporary source is deliberately not a
+Git clone. For everyday use, point the manifest at your own durable clones.
 
-If `skillbox doctor` says `unknown command 'doctor'`, you are hitting the npm CLI (`christiananagnostou/skillbox`), not this tool — fix `$PATH` order (or unlink the Homebrew/npm binary) and re-check with `command -v skillbox`.
+## Install for your coding tools
+
+From the Skillbox clone:
+
+```bash
+mkdir -p ~/.local/bin ~/.skillbox
+ln -s "$PWD/bin/skillbox.py" ~/.local/bin/skillbox
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+The symlink command refuses an occupied destination. If you already have a
+manifest, edit it in place. Otherwise copy
+[skills.toml.example](skills.toml.example) to `~/.skillbox/skills.toml`.
+Replace its example source paths with your actual skill repositories before
+running these commands. Create any configured host directories that do not
+exist yet; Skillbox skips missing roots.
+
+```bash
+skillbox sync --no-pull
+skillbox doctor
+```
+
+`sync --no-pull` mounts local sources without updating Git. It may replace an
+existing symlink in a configured skill slot; it refuses a real file or folder.
+Review the configured roots first. `doctor --strict` also checks source Git
+health and rejects unmanaged or shadowed sources.
+
+If `doctor` is an unknown command, check `command -v skillbox`: an unrelated
+npm package has the same name. Put `~/.local/bin` first on `PATH`.
+
+## Everyday commands
+
+| Want to… | Run |
+| --- | --- |
+| See each skill and its source | `skillbox list` |
+| Mount one existing skill | `skillbox add review --source personal` |
+| Create a skill in your source | `skillbox new review --repo personal` |
+| Check every mount | `skillbox doctor` |
+| Preview source updates | `skillbox update --dry-run` |
+| Relink without fetching | `skillbox sync --no-pull` |
+
+`update --dry-run` fetches Git refs. Default `sync` pulls source repositories;
+use `--no-pull` when you only want local mount repair.
+
+## Safety and contribution
+
+Skillbox manages symlinks, not skill trust. Review a source before mounting it.
+Its private-content markers help catch accidental promotion, but they are not
+a complete secret scanner. See [Security](SECURITY.md) for exact boundaries.
+
+Found a mount that behaves differently across tools? Open an
+[issue](https://github.com/firstbitelabsllc/skillbox/issues) with the smallest
+manifest that reproduces it, replacing personal paths with examples.
+[Contributing](CONTRIBUTING.md) covers the hermetic tests and focused changes.
+
+```bash
+bash tests/run_all.sh
+```
+
+[MIT License](LICENSE).
+
+<details>
+<summary>Command details, source precedence, retirement, and uninstall</summary>
 
 ## Uninstall
 
@@ -146,20 +221,5 @@ calling a route fully retired.
 
 See [skills.toml.example](skills.toml.example) for the manifest shape. Sources are **local paths only**.
 
-## Tests
 
-```bash
-bash tests/run_all.sh   # fully hermetic — runs against a sandbox, never your real fleet
-```
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for how to run individual scenarios.
-
-## Security
-
-Local mounts, symlink name guards, explicit network verbs, and private-boundary scrub — see [SECURITY.md](SECURITY.md).
-
-## License
-
-MIT — see [LICENSE](LICENSE).
-
-Canonical repo (post-transfer): <https://github.com/firstbitelabsllc/skillbox>
+</details>
