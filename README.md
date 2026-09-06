@@ -187,9 +187,20 @@ will not recreate them. Retirement only parks slots that still point at that
 specific source leaf; it refuses real files, a different tool's symlink, or an
 active lower-priority copy that would otherwise take over the same name.
 Rather than deleting a mutable runtime link, `retire` parks each accepted link
-in a fresh hidden recovery folder within that same runtime root. The old route
-is no longer active, while its exact link remains recoverable; if anything
-changes mid-operation, Skillbox stops and prints the retained recovery path.
+in one fresh private recovery root beside the manifest (normally
+`~/.skillbox/recovery`). Skillbox refuses to use it unless it sits outside every
+configured runtime root, including broader nested roots. The old route is no
+longer active, while its exact link remains recoverable without a recursive
+compatibility loader rediscovering it as a skill; if anything changes mid-
+operation, Skillbox stops and prints the retained recovery path.
+When a retired runtime link used a relative target, the journal's `mount` is
+rebased to that verified absolute destination and the original spelling is
+preserved alongside it as `raw-mount`; moving the journal therefore cannot
+silently change what recovery means.
+`sync --no-pull` also relocates any journal made by the prior in-root layout,
+or refuses rather than claiming a clean runtime if it cannot verify that
+relocation. `doctor` reports an in-root legacy journal as blocking
+`LEGACY-RECOVERY` until that sync completes.
 It verifies that the named journal is still the exact directory it holds
 and that the runtime-root path still names its held directory before reporting
 that path; if another same-user process renames either one, it fails without
