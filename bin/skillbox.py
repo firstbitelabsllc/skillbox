@@ -955,6 +955,8 @@ def owner_of(target, sources, plan, name):
 
 def cmd_list(roots, sources):
     plan, _ = resolve_plan(sources)
+    if not roots:
+        sys.exit(f"manifest {MANIFEST} has no runtime roots under [roots] — see skills.toml.example")
     root = next(iter(roots.values()))
     if not root.is_dir():
         sys.exit(f"primary root missing: {root}")
