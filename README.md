@@ -31,7 +31,7 @@ folder into each tool's directory; `doctor` says when a link is broken or
 stale. That's the product.
 
 [Install](#install) · [Try it](#try-it) ·
-[Commands](#command-details-source-precedence-retirement-and-uninstall) ·
+[Commands](#verbs) ·
 [Security](SECURITY.md) · [Issues](https://github.com/firstbitelabsllc/skillbox/issues)
 
 <p align="center">
@@ -158,7 +158,7 @@ skillbox sync [--no-pull]           pull Git sources by default, then relink/pru
 skillbox update [--dry-run]         pull Git sources; --dry-run fetches and previews SKILL.md diffs; failures exit nonzero
 ```
 
-Skillbox does not keep a provenance registry for runtime-root symlinks. `add` and `sync` may replace any symlink occupying a configured `<root>/<name>` slot when its target differs, and `rm` may unlink any symlink in the named slot. A real file or directory is refused and left untouched. `sync` prunes a dangling link only when its target is inside a configured source and the source parent still exists; unrelated dangling links in a runtime root are preserved.
+Skillbox does not keep a provenance registry for runtime-root symlinks. `add` and `sync` may replace any symlink occupying a configured `<root>/<name>` slot when its target differs, and `rm` may unlink any symlink in the named slot. A real file or directory is refused and left untouched. `sync` prunes a dangling link only when its target is inside a configured source and that source's configured path still exists; unrelated dangling links in a runtime root are preserved.
 
 `update` and the default `sync` explicitly contact each configured Git source’s remote (`git pull --ff-only`). `update --dry-run` still runs `git fetch`, which can update remote-tracking refs, but does not change the source working tree. Use `sync --no-pull` for a local-only relink/prune pass. Skillbox has no background fetcher and no remote-catalog install path.
 
