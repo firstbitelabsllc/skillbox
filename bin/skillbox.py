@@ -1361,7 +1361,11 @@ def _dispatch_command(args, roots, sources):
         cmd_promote(roots, sources, args[1], opt("--to"))
     elif cmd == "source" and args[1:2] == ["add"] and len(args) >= 4:
         p = opt("--priority")
-        cmd_source_add(args[2], args[3], int(p) if p else None)
+        try:
+            priority = int(p) if p else None
+        except ValueError:
+            sys.exit(f"--priority needs an integer, got {p!r}")
+        cmd_source_add(args[2], args[3], priority)
     elif cmd == "source" and args[1:2] == ["rm"] and len(args) >= 3:
         cmd_source_rm(args[2])
     elif cmd == "diff" and len(args) >= 2:
