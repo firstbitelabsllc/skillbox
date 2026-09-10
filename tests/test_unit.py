@@ -779,6 +779,39 @@ class SkillboxWorld(unittest.TestCase):
                         self.assertEqual((slot / "payload").read_bytes(), b"protected directory bytes")
                         shutil.rmtree(slot)
 
+    def test_link_one_retains_raced_file_when_its_slot_is_reoccupied(self):
+        root = self.roots_loaded["claude"]
+        slot = root / "raced"
+        slot.symlink_to(self.team_dir / "alpha")
+        original_rename = sb._rename_noreplace_at
+        armed = True
+
+        def swap_then_reoccupy(src_fd, src_name, dst_fd, dst_name):
+            nonlocal armed
+            if armed and src_name == "raced" and dst_name == "entry":
+                armed = False
+                os.unlink(src_name, dir_fd=src_fd)
+                first_fd = os.open(src_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                                   0o600, dir_fd=src_fd)
+                os.write(first_fd, b"first writer bytes")
+                os.close(first_fd)
+                result = original_rename(src_fd, src_name, dst_fd, dst_name)
+                second_fd = os.open(src_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                                    0o600, dir_fd=src_fd)
+                os.write(second_fd, b"second writer bytes")
+                os.close(second_fd)
+                return result
+            return original_rename(src_fd, src_name, dst_fd, dst_name)
+
+        with patch.object(sb, "_rename_noreplace_at", side_effect=swap_then_reoccupy):
+            sb.link_one({"claude": root}, "raced", self.team_dir / "beta", quiet=True)
+
+        self.assertEqual(slot.read_bytes(), b"second writer bytes")
+        preserved = list(root.glob(".skillbox-preserve-raced-*/entry"))
+        self.assertEqual(len(preserved), 1)
+        self.assertEqual(preserved[0].read_bytes(), b"first writer bytes")
+        self.assertEqual(preserved[0].parent.stat().st_mode & 0o777, 0o700)
+
     def test_cmd_retire_preserves_a_slot_replaced_during_mutation(self):
         # The preflight check and mutation are separate filesystem operations.
         # If another writer replaces a slot in between, retirement must preserve
