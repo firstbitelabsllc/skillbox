@@ -244,6 +244,47 @@ class SkillboxWorld(unittest.TestCase):
                 self.assertIn("hosts must be", result.stderr)
                 self.assertTrue(all(not list(root.iterdir()) for root in self.roots.values()))
 
+    def _retirement_journals(self, slot=None):
+        journals = list((sb.CONFIG_DIR / "retired-mounts").glob(".skillbox-retire-beta-*"))
+        if slot is not None:
+            journals = [journal for journal in journals
+                        if json.loads((journal / "origin.json").read_text())["slot"] == str(slot)]
+        return journals
+
+    def test_retire_is_not_discovered_by_recursive_hosts(self):
+        team = dict(self.sources[0], exclude=frozenset({"beta"}))
+        sources = [team, *self.sources[1:]]
+        target = self.team_dir / "beta"
+        for root in self.roots_loaded.values():
+            (root / "beta").symlink_to(target)
+        with redirect_stdout(io.StringIO()):
+            sb.cmd_retire(self.roots_loaded, sources, "beta", "team")
+        for root in self.roots_loaded.values():
+            found = [str(Path(directory) / "SKILL.md")
+                     for directory, _, files in os.walk(root, followlinks=True)
+                     if "SKILL.md" in files]
+            self.assertEqual(found, [], f"recursive host still discovers retired skill: {root}")
+        journals = self._retirement_journals()
+        self.assertEqual(len(journals), len(self.roots_loaded))
+        for journal in journals:
+            self.assertEqual((journal / "mount").resolve(), target)
+            for root in self.roots_loaded.values():
+                self.assertFalse(journal.is_relative_to(root))
+
+    def test_retire_refuses_recovery_storage_inside_a_runtime_root(self):
+        team = dict(self.sources[0], exclude=frozenset({"beta"}))
+        sources = [team, *self.sources[1:]]
+        target = self.team_dir / "beta"
+        for root in self.roots_loaded.values():
+            (root / "beta").symlink_to(target)
+        with patch.object(sb, "CONFIG_DIR", self.roots_loaded["claude"] / "state"):
+            with self.assertRaises(SystemExit) as raised:
+                sb.cmd_retire(self.roots_loaded, sources, "beta", "team")
+        self.assertIn("outside every runtime root", str(raised.exception))
+        for root in self.roots_loaded.values():
+            self.assertEqual((root / "beta").resolve(), target)
+        self.assertFalse((self.roots_loaded["claude"] / "state").exists())
+
     def test_help_is_read_only_before_manifest_or_lock(self):
         manifest = self.tmp / "missing" / "skills.toml"
         invocations = (
@@ -824,7 +865,7 @@ class SkillboxWorld(unittest.TestCase):
         for slot in slots[1:]:
             self.assertTrue(slot.is_symlink())
             self.assertEqual(slot.resolve(), target.resolve())
-        journals = list(slots[0].parent.glob(".skillbox-retire-beta-*"))
+        journals = self._retirement_journals(slots[0])
         self.assertEqual(len(journals), 1)
         preserved = journals[0] / "mount"
         self.assertTrue(preserved.is_file())
@@ -874,7 +915,7 @@ class SkillboxWorld(unittest.TestCase):
         for slot in slots:
             self.assertTrue(slot.is_symlink())
             self.assertEqual(slot.resolve(), target.resolve())
-        journals = list(self.tmp.rglob(".skillbox-retire-beta-*"))
+        journals = self._retirement_journals()
         self.assertEqual(len(journals), 1)
         preserved = journals[0] / "mount"
         self.assertTrue(preserved.is_file())
@@ -898,8 +939,8 @@ class SkillboxWorld(unittest.TestCase):
 
         def move_journal_then_park(root_fd, skill, journal_fd):
             if not raced:
-                root = slots[0].parent
-                journals = list(root.glob(".skillbox-retire-beta-*"))
+                root = sb.CONFIG_DIR / "retired-mounts"
+                journals = self._retirement_journals(slots[0])
                 self.assertEqual(len(journals), 1)
                 original = journals[0]
                 moved = root / f"{original.name}-moved"
@@ -923,6 +964,35 @@ class SkillboxWorld(unittest.TestCase):
         for slot in slots[1:]:
             self.assertTrue(slot.is_symlink())
             self.assertEqual(slot.resolve(), target.resolve())
+
+    def test_cmd_retire_refuses_a_replaced_recovery_storage_path(self):
+        team = dict(self.sources[0], exclude=frozenset({"beta"}))
+        sources = [team, *self.sources[1:]]
+        target = self.team_dir / "beta"
+        slots = [self.roots_loaded[host] / "beta" for host in ("claude", "cursor")]
+        for slot in slots:
+            slot.symlink_to(target)
+        original_park = sb._park_slot_noreplace
+        storage = sb.CONFIG_DIR / "retired-mounts"
+        moved = sb.CONFIG_DIR / "retired-mounts-moved"
+        calls = []
+
+        def replace_storage_then_park(root_fd, skill, journal_fd):
+            calls.append(skill)
+            if len(calls) == 2:
+                storage.rename(moved)
+                storage.mkdir(mode=0o700)
+            return original_park(root_fd, skill, journal_fd)
+
+        with patch.object(sb, "_park_slot_noreplace", new=replace_storage_then_park):
+            with self.assertRaises(SystemExit) as raised:
+                sb.cmd_retire(self.roots_loaded, sources, "beta", "team")
+        self.assertIn("nominal recovery path is untrusted", str(raised.exception))
+        self.assertTrue(all(not slot.is_symlink() for slot in slots))
+        archives = list(moved.glob(".skillbox-retire-beta-*/mount"))
+        self.assertEqual(len(archives), len(slots))
+        self.assertTrue(all(archive.resolve() == target for archive in archives))
+        self.assertNotIn("verified recovery retained", str(raised.exception))
 
     def test_cmd_retire_refuses_to_claim_a_runtime_root_replaced_mid_park(self):
         # Root FDs anchor the move even if a same-user writer renames the
@@ -953,7 +1023,7 @@ class SkillboxWorld(unittest.TestCase):
 
         message = str(raised.exception)
         self.assertIn("nominal recovery path is untrusted", message)
-        journals = list(raced["moved"].glob(".skillbox-retire-beta-*"))
+        journals = self._retirement_journals(slots[0])
         self.assertEqual(len(journals), 1)
         actual_archive = journals[0] / "mount"
         self.assertNotIn(str(raced["original"] / journals[0].name / "mount"), message)
@@ -1019,7 +1089,7 @@ class SkillboxWorld(unittest.TestCase):
         for slot in slots[1:]:
             self.assertTrue(slot.is_symlink())
             self.assertEqual(slot.resolve(), target.resolve())
-        journals = list(slots[0].parent.glob(".skillbox-retire-beta-*"))
+        journals = self._retirement_journals(slots[0])
         self.assertEqual(len(journals), 1)
         self.assertTrue((journals[0] / "mount").is_symlink())
         self.assertEqual((journals[0] / "mount").resolve(), target.resolve())
@@ -1044,14 +1114,15 @@ class SkillboxWorld(unittest.TestCase):
         for slot in slots:
             self.assertFalse(slot.exists())
             self.assertFalse(slot.is_symlink())
-        # Do not use Path.rglob here: Python's recursive glob treatment of
-        # dot-prefixed journal folders differs across supported versions. Each
-        # runtime root has exactly one known hidden journal after this success.
+        # Relative link bytes remain exact; origin.json preserves the directory
+        # in which those bytes must be interpreted when restoring the mount.
         parked = []
         for root in self.roots_loaded.values():
-            journals = list(root.glob(".skillbox-retire-beta-*"))
+            journals = self._retirement_journals(root / "beta")
             self.assertEqual(len(journals), 1)
             parked.append(journals[0] / "mount")
+            origin = json.loads((journals[0] / "origin.json").read_text())
+            self.assertEqual(origin, {"slot": str(root / "beta"), "target": os.path.relpath(target, root)})
         self.assertEqual(len(parked), len(slots))
         self.assertTrue(all(path.is_symlink() for path in parked))
         self.assertEqual({os.readlink(path) for path in parked}, raw_targets)

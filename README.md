@@ -107,8 +107,10 @@ will not recreate them. Retirement only parks slots that still point at that
 specific source leaf; it refuses real files, a different tool's symlink, or an
 active lower-priority copy that would otherwise take over the same name.
 Rather than deleting a mutable runtime link, `retire` parks each accepted link
-in a fresh hidden recovery folder within that same runtime root. The old route
-is no longer active, while its exact link remains recoverable; if anything
+in a fresh recovery folder under `$SKILLBOX_STATE_DIR/retired-mounts` (by default,
+`~/.skillbox/retired-mounts`), outside every runtime root. Recursive host discovery
+therefore cannot load the retired skill. The exact link and an `origin.json`
+record of its original slot and target remain recoverable; if anything
 changes mid-operation, Skillbox stops and prints the retained recovery path.
 It verifies that the named journal is still the exact directory it holds
 and that the runtime-root path still names its held directory before reporting
@@ -122,6 +124,9 @@ Skillbox command. Retirement additionally uses the operating system's
 no-replace move primitive: a non-cooperating filesystem change is captured or
 refused and reported, never overwritten. Skillbox deliberately leaves hidden
 recovery journals behind on a failed retirement rather than racing a cleanup.
+Recovery storage inside a runtime root is refused. A root on a different
+filesystem from recovery storage is also refused; retirement never substitutes
+a non-atomic copy-and-delete operation.
 Skillbox also refuses to create or promote a skill into a source that excludes
 its name. `rm` remains the deliberately broad manual unlink command. Exclusion
 is per source, so use `retire` to preflight every configured source before

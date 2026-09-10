@@ -38,7 +38,7 @@ except ModuleNotFoundError:
         tomllib = None
 
 # Single source of truth for the public release identity (`skillbox --version`).
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 
 # Config is overridable via $SKILLBOX_MANIFEST so the test harness can point at a
 # hermetic sandbox manifest (with fake roots + fake source repos) and never touch
@@ -291,8 +291,22 @@ def _open_runtime_dir_at(parent_fd, name):
     return os.open(name, flags, dir_fd=parent_fd)
 
 
+def _open_recovery_root(roots):
+    path = CONFIG_DIR.resolve() / "retired-mounts"
+    for root in roots.values():
+        if path.is_relative_to(root.resolve()):
+            raise OSError(errno.EINVAL, "recovery storage must be outside every runtime root", str(path))
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = _open_runtime_dir(path)
+    mode = os.fstat(fd)
+    if mode.st_uid != os.getuid() or mode.st_mode & 0o077:
+        os.close(fd)
+        raise OSError(errno.EPERM, "recovery storage must be a private owned directory", str(path))
+    return path, fd
+
+
 def _new_recovery_journal(root_fd, skill):
-    """Create a private journal beneath an already-open runtime root FD."""
+    """Create a private journal beneath the external recovery directory FD."""
     for _ in range(128):
         name = f".skillbox-retire-{skill}-{secrets.token_hex(16)}"
         try:
@@ -335,6 +349,11 @@ def _runtime_root_matches(root_path, root_fd):
         and named.st_dev == held.st_dev
         and named.st_ino == held.st_ino
     )
+
+
+def _recovery_matches(path, parent_fd, name, journal_fd):
+    return (_runtime_root_matches(path, parent_fd)
+            and _journal_matches(parent_fd, name, journal_fd))
 
 
 def _entry_present(dir_fd, name):
@@ -803,20 +822,28 @@ def cmd_retire(roots, sources, skill, source_id):
     # The final move itself is an OS no-replace rename between anchored parent
     # FDs, so it never overwrites a recovery entry planted by another writer.
     retained, failure = [], None
+    recovery_fd = None
     try:
+        if removable:
+            recovery_path, recovery_fd = _open_recovery_root(roots)
         for rname, root, root_path, root_fd, raw_target in removable:
             if not _runtime_root_matches(root_path, root_fd):
                 failure = (f"runtime root for {root / skill} changed before parking; "
                            "no runtime slot was moved")
                 break
-            journal_name = _new_recovery_journal(root_fd, skill)
-            archive = root_path / journal_name / "mount"
+            journal_name = _new_recovery_journal(recovery_fd, skill)
+            archive = recovery_path / journal_name / "mount"
             try:
-                journal_fd = _open_runtime_dir_at(root_fd, journal_name)
+                journal_fd = _open_runtime_dir_at(recovery_fd, journal_name)
             except OSError as error:
                 failure = f"could not open recovery journal for {root / skill}: {error}"
                 break
             try:
+                origin_fd = os.open("origin.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                                    0o600, dir_fd=journal_fd)
+                with os.fdopen(origin_fd, "w") as origin:
+                    json.dump({"slot": str(root_path / skill), "target": raw_target}, origin)
+                    origin.write("\n")
                 # The no-replace move is FD-anchored, but this check is what
                 # makes the path in our receipt truthful.  If another process
                 # renames/replaces the journal, do not claim the old pathname
@@ -825,7 +852,7 @@ def cmd_retire(roots, sources, skill, source_id):
                     failure = (f"runtime root for {root / skill} changed before parking; "
                                "no runtime slot was moved")
                     break
-                if not _journal_matches(root_fd, journal_name, journal_fd):
+                if not _recovery_matches(recovery_path, recovery_fd, journal_name, journal_fd):
                     failure = (f"recovery journal for {root / skill} changed before parking; "
                                "no runtime slot was moved")
                     break
@@ -835,7 +862,7 @@ def cmd_retire(roots, sources, skill, source_id):
                     )
                 except OSError as error:
                     if (_runtime_root_matches(root_path, root_fd)
-                            and _journal_matches(root_fd, journal_name, journal_fd)):
+                            and _recovery_matches(recovery_path, recovery_fd, journal_name, journal_fd)):
                         retained.append(archive)
                         failure = f"could not park {root / skill}: {error}"
                     else:
@@ -847,7 +874,7 @@ def cmd_retire(roots, sources, skill, source_id):
                     failure = (f"{root / skill} was parked, but its runtime root changed "
                                "during retirement; the nominal recovery path is untrusted")
                     break
-                if not _journal_matches(root_fd, journal_name, journal_fd):
+                if not _recovery_matches(recovery_path, recovery_fd, journal_name, journal_fd):
                     failure = (f"{root / skill} was parked, but its recovery journal changed "
                                "during retirement; the nominal recovery path is untrusted")
                     break
@@ -875,7 +902,14 @@ def cmd_retire(roots, sources, skill, source_id):
                 failure = (f"{root / skill} changed during retirement; its source link is "
                            f"preserved in {journal_name}")
                 break
+    except OSError as error:
+        failure = f"could not prepare recovery storage: {error}"
     finally:
+        if recovery_fd is not None:
+            if not _runtime_root_matches(recovery_path, recovery_fd):
+                retained.clear()
+                failure = failure or "recovery storage changed; the nominal recovery paths are untrusted"
+            os.close(recovery_fd)
         for _, _, _, root_fd, _ in removable:
             try:
                 os.close(root_fd)
@@ -889,7 +923,7 @@ def cmd_retire(roots, sources, skill, source_id):
 
     archives = "; ".join(str(archive) for archive in retained)
     print(f"retired {skill} from {source_id}: parked {len(removable)} runtime slot(s) "
-          f"in hidden recovery folders: {archives}")
+          f"outside runtime roots: {archives}")
 
 
 def cmd_update(sources, dry):
