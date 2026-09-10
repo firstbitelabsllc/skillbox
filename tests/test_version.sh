@@ -22,7 +22,7 @@ out="$(python3 "$SKILLBOX_BIN" --version 2>&1)"
 rc=$?
 
 sb_eq "--version exits 0 with no home config" "$rc" "0"
-sb_eq "--version prints exact identity line" "$out" "skillbox 1.0.0"
+sb_eq "--version prints exact identity line" "$out" "skillbox 1.1.1"
 
 # Negative: still no fleet/home side effects after the call.
 sb_eq "no HOME tree created by --version" \

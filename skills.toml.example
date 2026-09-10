@@ -20,6 +20,11 @@ priority = 1
 # runtime root. First run `skillbox retire legacy-alias --source shared`, then `sync --no-pull`
 # will not recreate it.
 # exclude = ["legacy-alias"]
+# Optional: mount this source only in the named [roots] entries, for example
+# when the other hosts install its native plugin. Omit to mount in every root.
+# hosts = ["cursor"]
+# An existing link on another host is drift: inspect it and remove it explicitly.
+# `retire` still checks every root when cleaning an explicitly excluded skill.
 
 # Your own skills repo. `skillbox new` lands here by default
 # (override the default id with $SKILLBOX_DEFAULT_SOURCE).

@@ -184,6 +184,66 @@ class SkillboxWorld(unittest.TestCase):
         env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
         return env
 
+    def test_source_hosts_mount_and_retirement_lifecycle(self):
+        _repo, skills, _sources, _remote = self._tracked_git_source()
+        roots = {host: self.roots[host] for host in ("claude", "cursor")}
+        manifest = ('[roots]\n' + ''.join(f'{host} = "{root}"\n' for host, root in roots.items()) +
+                    f'\n[sources.custom-package]\npath = "{skills}"\npriority = 1\n')
+        self.manifest.write_text(manifest)
+
+        def run(*args, succeeds=True):
+            result = subprocess.run([sys.executable, SKILLBOX_PY, *args],
+                                    capture_output=True, text=True,
+                                    env=self._cli_env(self.manifest))
+            self.assertEqual(result.returncode == 0, succeeds, result.stdout + result.stderr)
+            return result
+
+        run("add", "delta")
+        for root in roots.values():
+            self.assertEqual((root / "delta").resolve(), skills / "delta")
+        run("rm", "delta")
+        self.manifest.write_text(manifest + 'hosts = ["cursor"]\n')
+        run("add", "delta", "--source", "custom-package")
+        self.assertEqual((roots["cursor"] / "delta").resolve(), skills / "delta")
+        self.assertFalse((roots["claude"] / "delta").is_symlink())
+        run("rm", "delta")
+        run("sync", "--no-pull")
+        self.assertEqual((roots["cursor"] / "delta").resolve(), skills / "delta")
+        self.assertFalse((roots["claude"] / "delta").is_symlink())
+        self.assertEqual(json.loads(run("doctor", "--json").stdout)["blocking"], 0)
+        self.assertIn("delta", run("list").stdout)
+
+        duplicate = roots["claude"] / "delta"
+        duplicate.symlink_to(skills / "delta")
+        problems = json.loads(run("doctor", "--json", succeeds=False).stdout)["problems"]
+        self.assertIn(("DRIFTED", "claude/delta"), [(p["kind"], p["where"]) for p in problems])
+        (roots["cursor"] / "delta").unlink()
+        for command in (("add", "delta"), ("sync", "--no-pull")):
+            run(*command, succeeds=False)
+            self.assertEqual(duplicate.resolve(), skills / "delta")
+            self.assertFalse((roots["cursor"] / "delta").is_symlink())
+
+        # Retirement must still reach a mount predating narrower host targeting.
+        self.manifest.write_text(manifest + 'hosts = ["cursor"]\nexclude = ["delta"]\n')
+        run("retire", "delta", "--source", "custom-package")
+        self.assertFalse(duplicate.is_symlink())
+        self.assertTrue((skills / "delta" / "SKILL.md").is_file())
+        run("sync", "--no-pull")
+        self.assertFalse(duplicate.is_symlink())
+
+    def test_source_hosts_refuses_invalid_manifest_before_mounting(self):
+        original = self.manifest.read_text()
+        for hosts in ('[]', '["unknown"]', '["cursor", "cursor"]', '"cursor"', '[1]'):
+            with self.subTest(hosts=hosts):
+                self.manifest.write_text(original.replace('[sources.team]\n',
+                                                         f'[sources.team]\nhosts = {hosts}\n'))
+                result = subprocess.run([sys.executable, SKILLBOX_PY, "sync", "--no-pull"],
+                                        capture_output=True, text=True,
+                                        env=self._cli_env(self.manifest))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("hosts must be", result.stderr)
+                self.assertTrue(all(not list(root.iterdir()) for root in self.roots.values()))
+
     def test_help_is_read_only_before_manifest_or_lock(self):
         manifest = self.tmp / "missing" / "skills.toml"
         invocations = (
@@ -1062,6 +1122,35 @@ class SkillboxWorld(unittest.TestCase):
             self.assertTrue(slot.is_symlink())
             self.assertEqual(slot.resolve(), target.resolve())
 
+    def test_cmd_retire_refuses_a_replaced_recovery_storage_path(self):
+        team = dict(self.sources[0], exclude=frozenset({"beta"}))
+        sources = [team, *self.sources[1:]]
+        target = self.team_dir / "beta"
+        slots = [self.roots_loaded[host] / "beta" for host in ("claude", "cursor")]
+        for slot in slots:
+            slot.symlink_to(target)
+        original_park = sb._park_slot_noreplace
+        storage = self._recovery_root()
+        moved = storage.with_name(storage.name + "-moved")
+        calls = []
+
+        def replace_storage_then_park(root_fd, skill, journal_fd):
+            calls.append(skill)
+            if len(calls) == 2:
+                storage.rename(moved)
+                storage.mkdir(mode=0o700)
+            return original_park(root_fd, skill, journal_fd)
+
+        with patch.object(sb, "_park_slot_noreplace", new=replace_storage_then_park):
+            with self.assertRaises(SystemExit) as raised:
+                sb.cmd_retire(self.roots_loaded, sources, "beta", "team")
+        self.assertIn("nominal recovery path is untrusted", str(raised.exception))
+        self.assertTrue(all(not slot.is_symlink() for slot in slots))
+        archives = list(moved.glob(".skillbox-retire-beta-*/mount"))
+        self.assertEqual(len(archives), len(slots))
+        self.assertTrue(all(archive.resolve() == target for archive in archives))
+        self.assertNotIn("verified recovery retained", str(raised.exception))
+
     def test_cmd_retire_refuses_to_claim_a_runtime_root_replaced_mid_park(self):
         # Root FDs anchor the move even if a same-user writer renames the
         # configured root.  The configured pathname is then a false receipt,
@@ -1197,6 +1286,10 @@ class SkillboxWorld(unittest.TestCase):
         self.assertTrue(all(path.resolve() == target.resolve() for path in parked))
         self.assertTrue(all(path.is_symlink() for path in raw_parked))
         self.assertEqual({os.readlink(path) for path in raw_parked}, raw_targets)
+        origins = [json.loads((journal / "origin.json").read_text()) for journal in journals]
+        self.assertEqual({origin["slot"] for origin in origins}, {str(slot) for slot in slots})
+        for origin in origins:
+            self.assertEqual(origin["target"], os.path.relpath(target, Path(origin["slot"]).parent))
 
     def test_cmd_retire_parks_recovery_outside_the_runtime_skill_root(self):
         # Compatibility loaders can recursively treat every SKILL.md beneath a
@@ -1215,6 +1308,10 @@ class SkillboxWorld(unittest.TestCase):
 
         for root in self.roots_loaded.values():
             self.assertEqual(list(root.glob(".skillbox-retire-beta-*")), [])
+            discovered = [str(Path(directory) / "SKILL.md")
+                          for directory, _, files in os.walk(root, followlinks=True)
+                          if "SKILL.md" in files]
+            self.assertEqual(discovered, [], f"recursive host still discovers a retired skill: {root}")
         recovery_root = self._recovery_root()
         self.assertTrue(recovery_root.is_dir())
         self.assertEqual(recovery_root.stat().st_mode & 0o077, 0)

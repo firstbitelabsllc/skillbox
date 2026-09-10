@@ -71,7 +71,7 @@ will not recreate them. Retirement only parks slots that still point at that
 specific source leaf; it refuses real files, a different tool's symlink, or an
 active lower-priority copy that would otherwise take over the same name.
 Rather than deleting a mutable runtime link, `retire` parks each accepted link
-in one fresh private recovery root beside the manifest (normally
+in one private recovery root under `$SKILLBOX_STATE_DIR` (normally
 `~/.skillbox/recovery`). Skillbox refuses to use it unless it sits outside every
 configured runtime root, including broader nested roots. The old route is no
 longer active, while its exact link remains recoverable without a recursive
@@ -80,7 +80,8 @@ operation, Skillbox stops and prints the retained recovery path.
 When a retired runtime link used a relative target, the journal's `mount` is
 rebased to that verified absolute destination and the original spelling is
 preserved alongside it as `raw-mount`; moving the journal therefore cannot
-silently change what recovery means.
+silently change what recovery means. Each new retirement journal also records
+the original slot and raw link target in `origin.json`.
 `sync --no-pull` also relocates any journal made by the prior in-root layout,
 or refuses rather than claiming a clean runtime if it cannot verify that
 relocation. `doctor` reports an in-root legacy journal as blocking
@@ -115,11 +116,19 @@ calling a route fully retired.
 | Env var | Purpose |
 |---|---|
 | `SKILLBOX_MANIFEST` | path to the manifest (default `~/.skillbox/skills.toml`) |
-| `SKILLBOX_STATE_DIR` | runtime lock directory (default: the manifest directory); set this when the manifest is read from a source-controlled checkout |
+| `SKILLBOX_STATE_DIR` | runtime lock and recovery directory (default: the manifest directory); set this when the manifest is read from a source-controlled checkout |
 | `SKILLBOX_ORG_REPO` | `owner/repo` of your plugin marketplace for `promote --to org` |
 | `SKILLBOX_DEFAULT_SOURCE` | default source id for `skillbox new` (default `personal`) |
 
 See [skills.toml.example](../skills.toml.example) for the manifest shape. Sources are **local paths only**.
+
+Set `hosts = ["cursor"]` in a source table to mount that source only in the
+`cursor` root. Host names must be distinct existing `[roots]` keys; an empty
+list is invalid. Omit `hosts` to keep mounting in every root. Source precedence
+still elects one winner for each skill across the manifest. `add` and `sync`
+refuse existing same-name links outside that winner's target hosts, and `doctor`
+reports them as drift. Inspect and remove those links explicitly; `retire`
+continues to check every root for an excluded source's old mounts.
 
 
 
