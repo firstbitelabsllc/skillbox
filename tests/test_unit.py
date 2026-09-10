@@ -184,6 +184,66 @@ class SkillboxWorld(unittest.TestCase):
         env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
         return env
 
+    def test_source_hosts_mount_and_retirement_lifecycle(self):
+        _repo, skills, _sources, _remote = self._tracked_git_source()
+        roots = {host: self.roots[host] for host in ("claude", "cursor")}
+        manifest = ('[roots]\n' + ''.join(f'{host} = "{root}"\n' for host, root in roots.items()) +
+                    f'\n[sources.custom-package]\npath = "{skills}"\npriority = 1\n')
+        self.manifest.write_text(manifest)
+
+        def run(*args, succeeds=True):
+            result = subprocess.run([sys.executable, SKILLBOX_PY, *args],
+                                    capture_output=True, text=True,
+                                    env=self._cli_env(self.manifest))
+            self.assertEqual(result.returncode == 0, succeeds, result.stdout + result.stderr)
+            return result
+
+        run("add", "delta")
+        for root in roots.values():
+            self.assertEqual((root / "delta").resolve(), skills / "delta")
+        run("rm", "delta")
+        self.manifest.write_text(manifest + 'hosts = ["cursor"]\n')
+        run("add", "delta", "--source", "custom-package")
+        self.assertEqual((roots["cursor"] / "delta").resolve(), skills / "delta")
+        self.assertFalse((roots["claude"] / "delta").is_symlink())
+        run("rm", "delta")
+        run("sync", "--no-pull")
+        self.assertEqual((roots["cursor"] / "delta").resolve(), skills / "delta")
+        self.assertFalse((roots["claude"] / "delta").is_symlink())
+        self.assertEqual(json.loads(run("doctor", "--json").stdout)["blocking"], 0)
+        self.assertIn("delta", run("list").stdout)
+
+        duplicate = roots["claude"] / "delta"
+        duplicate.symlink_to(skills / "delta")
+        problems = json.loads(run("doctor", "--json", succeeds=False).stdout)["problems"]
+        self.assertIn(("DRIFTED", "claude/delta"), [(p["kind"], p["where"]) for p in problems])
+        (roots["cursor"] / "delta").unlink()
+        for command in (("add", "delta"), ("sync", "--no-pull")):
+            run(*command, succeeds=False)
+            self.assertEqual(duplicate.resolve(), skills / "delta")
+            self.assertFalse((roots["cursor"] / "delta").is_symlink())
+
+        # Retirement must still reach a mount predating narrower host targeting.
+        self.manifest.write_text(manifest + 'hosts = ["cursor"]\nexclude = ["delta"]\n')
+        run("retire", "delta", "--source", "custom-package")
+        self.assertFalse(duplicate.is_symlink())
+        self.assertTrue((skills / "delta" / "SKILL.md").is_file())
+        run("sync", "--no-pull")
+        self.assertFalse(duplicate.is_symlink())
+
+    def test_source_hosts_refuses_invalid_manifest_before_mounting(self):
+        original = self.manifest.read_text()
+        for hosts in ('[]', '["unknown"]', '["cursor", "cursor"]', '"cursor"', '[1]'):
+            with self.subTest(hosts=hosts):
+                self.manifest.write_text(original.replace('[sources.team]\n',
+                                                         f'[sources.team]\nhosts = {hosts}\n'))
+                result = subprocess.run([sys.executable, SKILLBOX_PY, "sync", "--no-pull"],
+                                        capture_output=True, text=True,
+                                        env=self._cli_env(self.manifest))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("hosts must be", result.stderr)
+                self.assertTrue(all(not list(root.iterdir()) for root in self.roots.values()))
+
     def test_help_is_read_only_before_manifest_or_lock(self):
         manifest = self.tmp / "missing" / "skills.toml"
         invocations = (

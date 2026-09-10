@@ -146,6 +146,14 @@ calling a route fully retired.
 
 See [skills.toml.example](skills.toml.example) for the manifest shape. Sources are **local paths only**.
 
+Set `hosts = ["cursor"]` in a source table to mount that source only in the
+`cursor` root. Host names must be distinct existing `[roots]` keys; an empty
+list is invalid. Omit `hosts` to keep mounting in every root. Source precedence
+still elects one winner for each skill across the manifest. `add` and `sync`
+refuse existing same-name links outside that winner's target hosts, and `doctor`
+reports them as drift. Inspect and remove those links explicitly; `retire`
+continues to check every root for an excluded source's old mounts.
+
 ## Tests
 
 ```bash

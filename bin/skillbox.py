@@ -38,7 +38,7 @@ except ModuleNotFoundError:
         tomllib = None
 
 # Single source of truth for the public release identity (`skillbox --version`).
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 # Config is overridable via $SKILLBOX_MANIFEST so the test harness can point at a
 # hermetic sandbox manifest (with fake roots + fake source repos) and never touch
@@ -114,10 +114,17 @@ def load():
                 raise TypeError("source exclude must be an array of skill names")
             if len(exclude) != len(set(exclude)):
                 raise TypeError("source exclude must not repeat a skill name")
+            hosts = s.get("hosts", list(roots))
+            if "hosts" in s and (not isinstance(hosts, list) or not hosts or
+                    not all(isinstance(host, str) for host in hosts) or
+                    len(hosts) != len(set(hosts)) or set(hosts) - roots.keys()):
+                sys.exit(f"malformed manifest {MANIFEST}: source {sid!r} hosts must be "
+                         "a non-empty array of distinct names from [roots]")
             sources.append({
                 "id": sid, "path": Path(os.path.expanduser(s["path"])),
                 "priority": s.get("priority", 99), "single_skill": s.get("single_skill"),
                 "exclude": frozenset(require_name(name) for name in exclude),
+                "hosts": frozenset(hosts),
             })
         sources.sort(key=lambda s: s["priority"])
     except ((tomllib.TOMLDecodeError if tomllib else ValueError), json.JSONDecodeError) as e:
@@ -361,6 +368,21 @@ def git_root(path):
 
 # ── mount helpers ───────────────────────────────────────────────────────────
 
+def source_roots(roots, src):
+    return {name: root for name, root in roots.items()
+            if name in src.get("hosts", roots)}
+
+
+def checked_source_roots(roots, src, name):
+    targets = source_roots(roots, src)
+    unexpected = [f"{host}/{name}" for host, root in roots.items()
+                  if host not in targets and (root / name).is_symlink()]
+    if unexpected:
+        sys.exit(f"cannot mount '{name}' from {src['id']}: unexpected non-target "
+                 f"runtime slot(s): {', '.join(unexpected)}; inspect and remove explicitly")
+    return targets
+
+
 def link_one(roots, name, path, quiet=False):
     """Idempotently symlink name -> absolute source path into every root.
     Replaces any differing symlink in the configured slot; refuses real files/dirs."""
@@ -424,7 +446,8 @@ def prune_dangling(roots, sources, quiet=False):
                 # Runtime roots are shared with other tools. Never unlink an
                 # unknown dangling symlink just because it happens to live
                 # beside Skillbox mounts.
-                if not _target_in_sources(link, target, sources):
+                host_sources = [src for src in sources if rname in src.get("hosts", roots)]
+                if not _target_in_sources(link, target, host_sources):
                     if not quiet:
                         print(f"keep {rname}/{link.name}: target is outside configured sources")
                     continue
@@ -484,10 +507,11 @@ def cmd_new(roots, sources, name, repo=None):
     skill_dir = src["path"] / name
     if skill_dir.exists():  # clean refusal — never let mkdir raise a traceback
         sys.exit(f"path already exists: {skill_dir}")
+    targets = checked_source_roots(roots, src, name)
     skill_dir.mkdir(parents=True, exist_ok=False)
     (skill_dir / "SKILL.md").write_text(SKILL_TEMPLATE.format(name=name))
     print(f"created {skill_dir}/SKILL.md  (source: {repo})")
-    linked, relinked = link_one(roots, name, skill_dir)
+    linked, relinked = link_one(targets, name, skill_dir)
     print(f"mounted into {linked} runtime root(s)" + (f", relinked {relinked}" if relinked else ""))
 
 
@@ -673,12 +697,13 @@ def cmd_promote(roots, sources, name, to_id):
     if new_path.exists():
         sys.exit(f"cannot promote: {new_path} already exists")
     _scrub_guard_promote(name, path, src["id"], to_id)
+    targets = checked_source_roots(roots, tgt, name)
     import shutil
     new_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(path), str(new_path))
     print(f"promoted {name}: {src['id']} -> {to_id}")
     _, npath = resolve(name, sources)  # re-resolve winner (precedence may re-pick)
-    link_one(roots, name, npath or new_path, quiet=True)
+    link_one(targets, name, npath or new_path, quiet=True)
     prune_dangling(roots, sources, quiet=True)
     print(f"relinked {name} -> {npath or new_path}")
     print(f"reverse with: skillbox promote {name} --to {src['id']}")
@@ -690,9 +715,9 @@ def cmd_add(roots, sources, skill, prefer=None):
     src, path = resolve(skill, sources, prefer)
     if not src:
         sys.exit(f"not found: {skill}" + (f" in source {prefer}" if prefer else " in any source"))
-    linked, relinked = link_one(roots, skill, path)
+    linked, relinked = link_one(checked_source_roots(roots, src, skill), skill, path)
     if not linked and not relinked:
-        print(f"{skill}: already mounted everywhere")
+        print(f"{skill}: already mounted everywhere in its source's target hosts")
 
 
 def cmd_rm(roots, skill):
@@ -922,9 +947,11 @@ def cmd_sync(roots, sources, no_pull=False):
     if not no_pull and cmd_update(sources, dry=False):
         sys.exit("sync refused: one or more source updates failed")
     plan, _ = resolve_plan(sources)
+    targets = {name: checked_source_roots(roots, src, name)
+               for name, (src, _) in plan.items()}
     linked = relinked = 0
     for name, (src, path) in plan.items():
-        l, r = link_one(roots, name, path, quiet=True)
+        l, r = link_one(targets[name], name, path, quiet=True)
         linked += l
         relinked += r
     cleaned = prune_dangling(roots, sources, quiet=True)
@@ -949,17 +976,18 @@ def owner_of(target, sources, plan, name):
 
 def cmd_list(roots, sources):
     plan, _ = resolve_plan(sources)
-    root = next(iter(roots.values()))
-    if not root.is_dir():
-        sys.exit(f"primary root missing: {root}")
-    for link in sorted(root.iterdir()):
-        if not is_installed_skill_link(link):
-            continue
+    installed = {}
+    for root in roots.values():
+        if root.is_dir():
+            for link in root.iterdir():
+                if is_installed_skill_link(link):
+                    installed.setdefault(link.name, link)
+    for name, link in sorted(installed.items()):
         try:
             target = link.resolve()
         except OSError:
             target = None
-        print(f"{link.name:32} {owner_of(target, sources, plan, link.name)}")
+        print(f"{name:32} {owner_of(target, sources, plan, name)}")
 
 
 def skill_md_hash(path):
@@ -1129,6 +1157,11 @@ def doctor_problems(roots, sources):
             if not root.is_dir():
                 continue
             link = root / name
+            if winner and rname not in source_roots(roots, winner[0]):
+                if link.is_symlink():
+                    problems.append(("DRIFTED", f"{rname}/{name}",
+                                     f"source {winner[0]['id']} does not target this runtime"))
+                continue
             if not link.is_symlink():
                 if link.exists():
                     if winner:  # a real file blocks a skill that SHOULD mount → blocking
