@@ -724,6 +724,61 @@ class SkillboxWorld(unittest.TestCase):
         self.assertTrue(foreign_target.is_dir())
         self.assertIn("unlinked claude/alpha", output.getvalue())
 
+    def test_slot_mutations_preserve_raced_regular_files_and_directories(self):
+        """add/sync, rm, and prune never unlink a replacement after inspection."""
+        actions = ("link", "rm", "prune")
+        for action in actions:
+            for replacement_kind in ("file", "directory"):
+                with self.subTest(action=action, replacement_kind=replacement_kind):
+                    root = self.roots_loaded["claude"]
+                    slot = root / "raced"
+                    target = self.team_dir / "alpha"
+                    if action == "prune":
+                        target = self.team_dir / "gone"
+                    slot.symlink_to(target)
+
+                    original_rename = sb._rename_noreplace_at
+                    armed = True
+
+                    def swap_before_move(src_fd, src_name, dst_fd, dst_name):
+                        nonlocal armed
+                        if armed and src_name == "raced" and dst_name == "entry":
+                            armed = False
+                            os.unlink(src_name, dir_fd=src_fd)
+                            if replacement_kind == "file":
+                                fd = os.open(src_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                                             0o600, dir_fd=src_fd)
+                                os.write(fd, b"protected unknown bytes")
+                                os.close(fd)
+                            else:
+                                os.mkdir(src_name, dir_fd=src_fd)
+                                entry_fd = os.open(src_name, os.O_RDONLY | os.O_DIRECTORY,
+                                                   dir_fd=src_fd)
+                                try:
+                                    fd = os.open("payload", os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                                                 0o600, dir_fd=entry_fd)
+                                    os.write(fd, b"protected directory bytes")
+                                    os.close(fd)
+                                finally:
+                                    os.close(entry_fd)
+                        return original_rename(src_fd, src_name, dst_fd, dst_name)
+
+                    with patch.object(sb, "_rename_noreplace_at", side_effect=swap_before_move):
+                        if action == "link":
+                            sb.link_one({"claude": root}, "raced", self.team_dir / "beta", quiet=True)
+                        elif action == "rm":
+                            sb.cmd_rm({"claude": root}, "raced")
+                        else:
+                            self.assertEqual(sb.prune_dangling({"claude": root}, self.sources, quiet=True), 0)
+
+                    self.assertFalse(slot.is_symlink())
+                    if replacement_kind == "file":
+                        self.assertEqual(slot.read_bytes(), b"protected unknown bytes")
+                        slot.unlink()
+                    else:
+                        self.assertEqual((slot / "payload").read_bytes(), b"protected directory bytes")
+                        shutil.rmtree(slot)
+
     def test_cmd_retire_preserves_a_slot_replaced_during_mutation(self):
         # The preflight check and mutation are separate filesystem operations.
         # If another writer replaces a slot in between, retirement must preserve
