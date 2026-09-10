@@ -205,10 +205,10 @@
       </header>
       <h1>One skill folder.<br />Every tool.</h1>
       <p class="lead">
-        Link your skills into Claude Code, Codex, and Cursor. Edit the source
-        once. Each tool reads the same files.
+        Ask Claude Code or Codex to prove one source skill reaches both tools,
+        using temporary folders that leave your setup alone.
       </p>
-      <a class="action" href="#try-it">Try it in temporary folders</a>
+      <a class="action" href="#try-it">Ask your coding agent</a>
       <figure>
         <video
           controls
@@ -220,29 +220,34 @@
           <a href="skillbox-demo.mp4">Watch the demo</a>
         </video>
         <figcaption>
-          A real run: create a skill, link two folders, edit the source, and
-          check that both links see the change. The temporary source is a plain
-          folder, so “SOURCE-NOT-GIT” is expected.
+          A local run: create a skill, link two temporary folders, edit the
+          source, and check that both links see the change. The temporary
+          source is a plain folder, so “SOURCE-NOT-GIT” is expected.
         </figcaption>
       </figure>
       <section class="try" id="try-it">
         <div>
-          <h2>See it before setting it up.</h2>
+          <h2>See it with your coding agent.</h2>
           <p>
-            The demo uses its own temporary folders and removes them when it
-            finishes. Your installed skills and configuration stay untouched.
+            Open a disposable clone in Claude Code or Codex. Ask it to create
+            one source skill, mount it into temporary runtime folders, edit the
+            source, and show that both links read the change.
           </p>
-          <p>Python 3.11+, macOS or Linux.</p>
+          <p>
+            Keep its manifest and state directory inside those example folders.
+            Skillbox creates links; it does not start or configure an agent.
+          </p>
         </div>
         <div>
           <pre>
-git clone https://github.com/firstbitelabsllc/skillbox.git
-cd skillbox
-python3 examples/demo.py</pre
+Show me how Skillbox shares one skill with Claude Code and Codex. Use isolated
+example folders, edit the source, and prove both tools see the change.</pre
           >
           <a
-            href="https://github.com/firstbitelabsllc/skillbox#use-your-own-skills"
-            >Then connect your own skills ↗</a
+            href="https://github.com/firstbitelabsllc/skillbox#preview-the-linking-behavior"
+            >Preview the local linking demo ↗</a
+          ><br />
+          <a href="reference.md">Read the command reference</a
           >
         </div>
       </section>
