@@ -208,6 +208,75 @@ class SkillboxWorld(unittest.TestCase):
                 self.assertFalse(manifest.exists())
                 self.assertFalse(state_dir.exists())
 
+    def test_public_sync_refuses_a_relative_manifest_source_without_mounting(self):
+        """A hand-authored relative source must not become a CWD-relative mount."""
+        manifest = self.tmp / "relative-manifest" / "skills.toml"
+        manifest.parent.mkdir()
+        source = manifest.parent / "src" / "sample"
+        _write_skill(source, "sample")
+        roots = {}
+        for name in ("claude", "agents", "cursor", "codex"):
+            root = self.tmp / "relative-roots" / name
+            root.mkdir(parents=True)
+            roots[name] = root
+        state_dir = self.tmp / "relative-state"
+        state_dir.mkdir()
+        manifest.write_text(
+            "[roots]\n"
+            + "".join(f'{name} = "{root}"\n' for name, root in roots.items())
+            + "\n[sources.relative]\n"
+            + 'path = "src/sample"\npriority = 1\n'
+        )
+        before_manifest = manifest.read_text()
+
+        result = subprocess.run(
+            [sys.executable, SKILLBOX_PY, "sync", "--no-pull"],
+            capture_output=True,
+            text=True,
+            env=self._cli_env(manifest, state_dir),
+            cwd=manifest.parent,
+        )
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        output = result.stdout + result.stderr
+        self.assertIn("source 'relative'", output)
+        self.assertIn("use an absolute path", output)
+        self.assertEqual(manifest.read_text(), before_manifest)
+        for root in roots.values():
+            self.assertEqual(list(root.iterdir()), [], f"unexpected mount in {root}")
+
+    def test_public_source_add_accepts_a_tilde_path_and_writes_an_absolute_path(self):
+        home = self.tmp / "tilde-home"
+        source = home / "source"
+        _write_skill(source, "sample")
+        manifest = self.tmp / "tilde-manifest" / "skills.toml"
+        manifest.parent.mkdir()
+        roots = []
+        for name in ("claude", "agents", "cursor", "codex"):
+            root = self.tmp / "tilde-roots" / name
+            root.mkdir(parents=True)
+            roots.append(root)
+        manifest.write_text(
+            "[roots]\n"
+            + "".join(f'{root.name} = "{root}"\n' for root in roots)
+            + "\n[sources]\n"
+        )
+        state_dir = self.tmp / "tilde-state"
+        state_dir.mkdir()
+        env = self._cli_env(manifest, state_dir)
+        env["HOME"] = str(home)
+
+        result = subprocess.run(
+            [sys.executable, SKILLBOX_PY, "source", "add", "tilde", "~/source"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("added source 'tilde'", result.stdout)
+        self.assertIn(f'path = "{source}"', manifest.read_text())
+
     def test_top_level_identity_options_reject_trailing_flags(self):
         manifest = self.tmp / "missing" / "skills.toml"
         for identity in ("--help", "-h", "--version"):

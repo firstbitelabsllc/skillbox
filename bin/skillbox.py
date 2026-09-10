@@ -115,8 +115,11 @@ def load():
                 raise TypeError("source exclude must be an array of skill names")
             if len(exclude) != len(set(exclude)):
                 raise TypeError("source exclude must not repeat a skill name")
+            path = Path(os.path.expanduser(s["path"]))
+            if not path.is_absolute():
+                sys.exit(f"source '{sid}' has a relative path {s['path']!r}; use an absolute path")
             sources.append({
-                "id": sid, "path": Path(os.path.expanduser(s["path"])),
+                "id": sid, "path": path,
                 "priority": s.get("priority", 99), "single_skill": s.get("single_skill"),
                 "exclude": frozenset(require_name(name) for name in exclude),
             })
