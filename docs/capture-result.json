@@ -1,0 +1,8 @@
+{
+  "commands": [
+    "Claude Code receives the native interactive demo prompt",
+    "Claude Code runs python3 examples/demo.py"
+  ],
+  "browser": "153.0.8010.12",
+  "recordedAt": "2026-09-10T14:30:40.700Z"
+}

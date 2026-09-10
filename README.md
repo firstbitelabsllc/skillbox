@@ -1,178 +1,98 @@
-# skillbox
+<img src="docs/cover.png" width="1280" alt="Skillbox — One skill folder. Every tool.">
 
-One reviewed `SKILL.md` source, mounted into **Claude Code**, **Codex**, and **Cursor** without copying.
+# Skillbox
 
-Skillbox symlink-fans a single local skill folder into each agent runtime root. Edit the source once; every runtime sees the same file. No reinstall, no duplicate trees.
+**One skill folder. Every tool.**
 
-```
-  ~/src/my-skills/skills/deploy/SKILL.md     (one source of truth)
-              │
-              │  absolute symlinks (no copy)
-              ▼
-  ~/.claude/skills/deploy  →  Claude Code
-  ~/.agents/skills/deploy  →  Codex
-  ~/.cursor/skills/deploy  →  Cursor
-```
+Link your skills into Claude Code, Codex, and Cursor. Edit the source once.
+Each tool reads the same files.
 
-Local-first: sources are paths already on disk. Skillbox never stores a “tier” flag and never copies a skill folder into a runtime.
+![A native Claude Code session demonstrating Skillbox in isolated folders](docs/skillbox-agent-demo.png)
 
-**Tested platforms:** Python 3.11 and 3.12 / Bash on macOS and Linux. Windows is not claimed or tested.
+[Watch the Claude Code demo](docs/skillbox-agent-demo.mp4) · [Command reference](docs/reference.md) · [MIT license](LICENSE)
 
-## Install
+## See it with your coding agent
 
-```bash
+Clone Skillbox into a disposable workspace, open that workspace in Claude Code
+or Codex, and give it this prompt:
+
+> Show me how Skillbox shares one skill with Claude Code and Codex. Use isolated
+> example folders, edit the source, and prove both tools see the change.
+
+The useful proof is concrete: one source `SKILL.md`, links in temporary Claude
+Code and Codex skill folders, then one source edit visible through both links.
+Keep the manifest and state directory inside the example folder via
+`SKILLBOX_MANIFEST` and `SKILLBOX_STATE_DIR`; this leaves your installed skills
+and configuration untouched. Skillbox creates the links—it does not start or
+configure either coding agent.
+
+## Preview the linking behavior
+
+Python 3.11 or later, on macOS or Linux.
+
+```sh
 git clone https://github.com/firstbitelabsllc/skillbox.git
 cd skillbox
-mkdir -p ~/.local/bin ~/.skillbox \
-  ~/.claude/skills ~/.agents/skills ~/.cursor/skills ~/.codex/skills
-ln -s "$PWD/bin/skillbox.py" ~/.local/bin/skillbox  # fails safely if occupied
-# ~/.local/bin must be *before* Homebrew/npm bins on $PATH — an unrelated
-# npm package also named `skillbox` ships `doctor`-less commands.
+python3 examples/demo.py
+```
+
+This local preview creates one skill and links it into two temporary folders.
+It checks that both links read the same file, edits that file, and checks that
+both see the new instruction. The temporary folders are removed when it
+finishes. `SOURCE-NOT-GIT` is expected because its temporary source is a plain
+folder; use a Git clone for skills you want to version and share.
+
+For the full command reference, read [docs/reference.md](docs/reference.md).
+
+## Use your own skills
+
+Add the command to your PATH. Installation links to this clone, so keep it in place.
+
+```sh
+mkdir -p ~/.local/bin ~/.skillbox
+ln -s "$PWD/bin/skillbox.py" ~/.local/bin/skillbox
 export PATH="$HOME/.local/bin:$PATH"
-cp skills.toml.example ~/.skillbox/skills.toml   # keep [roots]; edit [sources.*] paths
-command -v skillbox   # should resolve to .../skillbox.py
-skillbox doctor       # run from anywhere
 ```
 
-The documented, CI-tested path is Python 3.11 or 3.12, using the standard-library `tomllib`. Older Python may work with `pip install tomli`, but is not tested. Git is required for the clone and for `diff`, `log`, `update`, and the default `sync`; the local mount commands otherwise use Python’s standard library. Bash is used by the test suite and shell examples.
+Create or edit `~/.skillbox/skills.toml` with the folders you use:
 
-If `skillbox doctor` says `unknown command 'doctor'`, you are hitting the npm CLI (`christiananagnostou/skillbox`), not this tool — fix `$PATH` order (or unlink the Homebrew/npm binary) and re-check with `command -v skillbox`.
+```toml
+[roots]
+claude = "~/.claude/skills"
+codex = "~/.agents/skills"
+cursor = "~/.cursor/skills"
 
-## Uninstall
-
-These steps unmount named runtime slots, then remove the CLI and optional config. They never delete your source skill folders.
-
-```bash
-# 1) Unmount skills from runtime roots (source folders stay on disk)
-skillbox list                    # see what’s mounted
-skillbox rm <name>               # repeat per skill; or leave mounts if you still want them
-
-# 2) Remove the CLI symlink and optional config
-readlink ~/.local/bin/skillbox   # inspect before removing; it should name this clone
-test -L ~/.local/bin/skillbox && rm ~/.local/bin/skillbox
-rm -f ~/.skillbox/skills.toml    # optional; delete only if you want config gone
-rmdir ~/.skillbox 2>/dev/null || true
-
-# 3) Optionally remove the clone itself (your skill repos are separate)
-# rm -rf /path/to/skillbox
+[sources.personal]
+path = "~/src/my-skills/skills"
+priority = 1
 ```
 
-`skillbox rm <name>` unlinks any symlink occupying `<configured-root>/<name>`, regardless of which tool created it. It ignores a real file or directory at that slot and never deletes the `SKILL.md` source directory.
+Point `path` at your existing source folder. It should contain one directory
+per skill, each with a `SKILL.md`. Then link and check:
 
-## Verbs
-
-```
-skillbox list                       installed skills + the source repo each resolves from
-skillbox new <name> [--repo ID]     scaffold a new skill and link it into every runtime
-skillbox add <name> [--source ID]   link an existing source skill into every runtime
-skillbox rm <name>                  unlink any symlink in the named runtime slots; leave the source untouched
-skillbox retire <name> --source ID  safely unmount an excluded source leaf; refuses foreign/replacement links
-skillbox promote <name> --to ID     move a skill to another source repo and relink (reversible)
-skillbox promote <name> --to org    publish to your org's plugin marketplace (prints a DRAFT PR; never sends)
-skillbox scrub [--dry-run] [--json]   list KEEP-PRIVATE / *-leo skills that would leak on promote
-skillbox scrub <name> --to ID         check one promote target; non-dry-run exits 1 if blocked
-skillbox source add <id> <path>     register a local source repo (e.g. a teammate's clone)
-skillbox diff <name> | log <name>   the skill folder's uncommitted diff / commit history
-skillbox doctor [--json] [--strict] check mounts and Git source health; strict also refuses unmanaged/shadowed/non-Git sources
-skillbox sync [--no-pull]           pull Git sources by default, then relink/prune only if every update succeeds
-skillbox update [--dry-run]         pull Git sources; --dry-run fetches and previews SKILL.md diffs; failures exit nonzero
+```sh
+skillbox sync --no-pull
+skillbox doctor
 ```
 
-Skillbox does not keep a provenance registry for runtime-root symlinks. `add` and `sync` may replace any symlink occupying a configured `<root>/<name>` slot when its target differs, and `rm` may unlink any symlink in the named slot. A real file or directory is refused and left untouched. `sync` prunes a dangling link only when its target is inside a configured source and the source parent still exists; unrelated dangling links in a runtime root are preserved.
+Read the source before mounting it. Skillbox checks links and source health;
+it does not vet what a skill tells an agent to do. Existing real folders are
+preserved, but symlinks in configured skill slots may be replaced.
 
-`update` and the default `sync` explicitly contact each configured Git source’s remote (`git pull --ff-only`). `update --dry-run` still runs `git fetch`, which can update remote-tracking refs, but does not change the source working tree. Use `sync --no-pull` for a local-only relink/prune pass. Skillbox has no background fetcher and no remote-catalog install path.
+## Everyday commands
 
-`doctor` always refuses unsafe mount drift and reports source provenance as
-diagnostics. `doctor --strict` also refuses source states that cannot be
-fast-forwarded without judgment (missing, dirty, detached, linked-worktree,
-ahead, behind, or diverged clones), unmanaged runtime skills, same-name source
-shadows, non-Git sources, sources without an upstream, and another `skillbox`
-executable shadowing this one on `PATH`. Source checks are read-only and compare
-the current local upstream ref; run `update --dry-run` first when you need a
-fresh network observation.
-
-`promote --to org` emits a Claude Code plugin manifest into the skill folder and **prints** a draft marketplace registration plus a `gh pr create --draft` command for `$SKILLBOX_ORG_REPO`. It never opens, pushes, or publishes that PR — you review and run it yourself.
-
-## Where a skill lives = how it's shared
-
-A skill’s reach is simply **which source repo holds the folder**, shown as the tag in each `list`/`doctor` row (e.g. `deploy  team`). `new` creates a skill in your own repo by default; `promote` is the one explicit command that moves a skill to a shared source and relinks it — reversible. `scrub` audits private-boundary skills (`KEEP-PRIVATE`, `*-leo`, `.keep-private`) and blocks `promote` when a move would leak them.
-
-Sources resolve in priority order; the first to define a name wins (a suffix like `-mine` lets you keep your own version of a shared skill). Run `skillbox doctor` any time to confirm every runtime is mounted consistently.
-
-To retire a compatibility alias without deleting its source folder, add an
-`exclude = ["old-alias"]` list to that source in `skills.toml`, run
-`skillbox retire old-alias --source <id>`, then run `skillbox sync --no-pull`.
-Excluded leaves are absent from `list`, `add`, and future sync plans, so sync
-will not recreate them. Retirement only parks slots that still point at that
-specific source leaf; it refuses real files, a different tool's symlink, or an
-active lower-priority copy that would otherwise take over the same name.
-Rather than deleting a mutable runtime link, `retire` parks each accepted link
-in a fresh recovery folder under `$SKILLBOX_STATE_DIR/retired-mounts` (by default,
-`~/.skillbox/retired-mounts`), outside every runtime root. Recursive host discovery
-therefore cannot load the retired skill. The exact link and an `origin.json`
-record of its original slot and target remain recoverable; if anything
-changes mid-operation, Skillbox stops and prints the retained recovery path.
-It verifies that the named journal is still the exact directory it holds
-and that the runtime-root path still names its held directory before reporting
-that path; if another same-user process renames either one, it fails without
-claiming the stale location as a receipt. The cooperative lock serializes
-normal Skillbox writers, but no local tool can preserve a recovery link after a
-separate same-user process deletes it after retirement completes.
-Each normal mutating command takes one short cooperative lock before it reads
-the manifest, so a waiting `sync` cannot revive an alias retired by another
-Skillbox command. Retirement additionally uses the operating system's
-no-replace move primitive: a non-cooperating filesystem change is captured or
-refused and reported, never overwritten. Skillbox deliberately leaves hidden
-recovery journals behind on a failed retirement rather than racing a cleanup.
-Recovery storage inside a runtime root is refused. A root on a different
-filesystem from recovery storage is also refused; retirement never substitutes
-a non-atomic copy-and-delete operation.
-Skillbox also refuses to create or promote a skill into a source that excludes
-its name. `rm` remains the deliberately broad manual unlink command. Exclusion
-is per source, so use `retire` to preflight every configured source before
-calling a route fully retired.
-## Runtime roots
-
-| Root | Runtime |
-|---|---|
-| `~/.claude/skills` | Claude Code |
-| `~/.agents/skills` | Codex (the dir Codex actually scans) |
-| `~/.cursor/skills` | Cursor |
-| `~/.codex/skills` | Cursor-compat / legacy (Codex does **not** scan this) |
-
-## Configuration
-
-| Env var | Purpose |
-|---|---|
-| `SKILLBOX_MANIFEST` | path to the manifest (default `~/.skillbox/skills.toml`) |
-| `SKILLBOX_STATE_DIR` | runtime lock directory (default: the manifest directory); set this when the manifest is read from a source-controlled checkout |
-| `SKILLBOX_ORG_REPO` | `owner/repo` of your plugin marketplace for `promote --to org` |
-| `SKILLBOX_DEFAULT_SOURCE` | default source id for `skillbox new` (default `personal`) |
-
-See [skills.toml.example](skills.toml.example) for the manifest shape. Sources are **local paths only**.
-
-Set `hosts = ["cursor"]` in a source table to mount that source only in the
-`cursor` root. Host names must be distinct existing `[roots]` keys; an empty
-list is invalid. Omit `hosts` to keep mounting in every root. Source precedence
-still elects one winner for each skill across the manifest. `add` and `sync`
-refuse existing same-name links outside that winner's target hosts, and `doctor`
-reports them as drift. Inspect and remove those links explicitly; `retire`
-continues to check every root for an excluded source's old mounts.
-
-## Tests
-
-```bash
-bash tests/run_all.sh   # fully hermetic — runs against a sandbox, never your real fleet
+```sh
+skillbox new explain --repo personal  # create a skill and link it
+skillbox list                        # show skills and their source
+skillbox doctor                      # check links and source health
+skillbox update --dry-run            # fetch and preview source changes
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for how to run individual scenarios.
+An npm package also uses the name `skillbox`. If the command looks different,
+check `command -v skillbox` and put `~/.local/bin` first on PATH.
 
-## Security
+[More commands and configuration](docs/reference.md) · [Security boundaries](SECURITY.md)
 
-Local mounts, symlink name guards, explicit network verbs, and private-boundary scrub — see [SECURITY.md](SECURITY.md).
-
-## License
-
-MIT — see [LICENSE](LICENSE).
-
-Canonical repo (post-transfer): <https://github.com/firstbitelabsllc/skillbox>
+For a bug report, include the command, its output, and the smallest manifest
+that reproduces the problem. [Open an issue](https://github.com/firstbitelabsllc/skillbox/issues).
+Run the existing checks with `bash tests/run_all.sh`.

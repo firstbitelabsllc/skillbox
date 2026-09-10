@@ -7,6 +7,18 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Fixed
+
+- `sync` no longer prunes a single-skill source's mounts while its repo is absent (unmounted or mid-move); a relative dangling link into a present source is now pruned.
+- `source add` stores the source path absolute, so the source resolves from any working directory.
+- `retire` refuses cleanly, and still prints the recovery path for slots it already parked, when a runtime root cannot hold a recovery journal.
+- `list` reports an empty `[roots]` table instead of raising `StopIteration`.
+- `source add --priority` rejects a non-integer instead of raising `ValueError`.
+
+### Changed
+
+- README opens with real `new`/`list`/`readlink`/`doctor` output and about 40% less prose.
+
 ### Removed
 
 - Retired the localhost management GUI and `ui` command. The manifest-driven CLI remains the sole mount, source-precedence, repair, and health interface.
