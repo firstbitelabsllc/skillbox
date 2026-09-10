@@ -1,7 +1,8 @@
 {
   "commands": [
-    "python3 examples/demo.py"
+    "Claude Code receives the native interactive demo prompt",
+    "Claude Code runs python3 examples/demo.py"
   ],
-  "browser": "151.0.7922.34",
-  "recordedAt": "2026-09-09T23:36:05.674Z"
+  "browser": "153.0.8010.12",
+  "recordedAt": "2026-09-10T14:30:40.700Z"
 }

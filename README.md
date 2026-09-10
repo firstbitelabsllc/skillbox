@@ -7,9 +7,9 @@
 Link your skills into Claude Code, Codex, and Cursor. Edit the source once.
 Each tool reads the same files.
 
-![An actual Skillbox demo linking one skill into two temporary tool folders](docs/skillbox-demo.png)
+![A native Claude Code session demonstrating Skillbox in isolated folders](docs/skillbox-agent-demo.png)
 
-[Watch the demo](docs/skillbox-demo.mp4) · [Command reference](docs/reference.md) · [MIT license](LICENSE)
+[Watch the Claude Code demo](docs/skillbox-agent-demo.mp4) · [Command reference](docs/reference.md) · [MIT license](LICENSE)
 
 ## See it with your coding agent
 
