@@ -7,11 +7,26 @@
 Link your skills into Claude Code, Codex, and Cursor. Edit the source once.
 Each tool reads the same files.
 
-![An actual Skillbox demo linking one skill into two temporary tool folders](docs/skillbox-demo.png)
+![A native Claude Code session demonstrating Skillbox in isolated folders](docs/skillbox-agent-demo.png)
 
-[Watch the demo](docs/skillbox-demo.mp4) · [Command reference](docs/reference.md) · [MIT license](LICENSE)
+[Watch the Claude Code demo](docs/skillbox-agent-demo.mp4) · [Command reference](docs/reference.md) · [MIT license](LICENSE)
 
-## Try it first
+## See it with your coding agent
+
+Clone Skillbox into a disposable workspace, open that workspace in Claude Code
+or Codex, and give it this prompt:
+
+> Show me how Skillbox shares one skill with Claude Code and Codex. Use isolated
+> example folders, edit the source, and prove both tools see the change.
+
+The useful proof is concrete: one source `SKILL.md`, links in temporary Claude
+Code and Codex skill folders, then one source edit visible through both links.
+Keep the manifest and state directory inside the example folder via
+`SKILLBOX_MANIFEST` and `SKILLBOX_STATE_DIR`; this leaves your installed skills
+and configuration untouched. Skillbox creates the links—it does not start or
+configure either coding agent.
+
+## Preview the linking behavior
 
 Python 3.11 or later, on macOS or Linux.
 
@@ -21,13 +36,13 @@ cd skillbox
 python3 examples/demo.py
 ```
 
-The demo creates one skill and links it into two temporary folders. It checks
-that both links read the same file, edits that file, and checks that both see
-the new instruction. The temporary folders are removed when it finishes.
-Your installed skills and configuration stay untouched.
+This local preview creates one skill and links it into two temporary folders.
+It checks that both links read the same file, edits that file, and checks that
+both see the new instruction. The temporary folders are removed when it
+finishes. `SOURCE-NOT-GIT` is expected because its temporary source is a plain
+folder; use a Git clone for skills you want to version and share.
 
-`SOURCE-NOT-GIT` is expected in this demo: its temporary source is a plain folder.
-Use a Git clone for skills you want to version and share.
+For the full command reference, read [docs/reference.md](docs/reference.md).
 
 ## Use your own skills
 

@@ -342,6 +342,76 @@ def _entry_present(dir_fd, name):
         return True
 
 
+def _remove_slot_symlink(root, name, expected_target=None):
+    """Remove one symlink slot without deleting a raced real replacement.
+
+    `unlink` cannot verify the entry type at the instant it removes a name. A
+    non-cooperating writer can replace a checked symlink with a real file or
+    directory just before an ordinary unlink. Move the entry into a private,
+    FD-anchored staging directory first. A captured real entry is moved back
+    with no-replace semantics; if another writer has occupied the slot, the
+    staging path is kept as its recovery location.
+
+    Returns ``(state, target)`` where state is ``removed``, ``missing``,
+    ``changed``, or ``preserved``. ``changed`` means a new symlink no longer
+    matches an expected raw target and was restored rather than removed.
+    """
+    root_fd = stage_fd = None
+    stage_name = None
+    try:
+        root_fd = _open_runtime_dir(root)
+        try:
+            mode = os.stat(name, dir_fd=root_fd, follow_symlinks=False).st_mode
+        except FileNotFoundError:
+            return "missing", None
+        if not stat.S_ISLNK(mode):
+            return "preserved", str(root / name)
+
+        stage_name = f".skillbox-preserve-{name}-{secrets.token_hex(16)}"
+        os.mkdir(stage_name, 0o700, dir_fd=root_fd)
+        stage_fd = _open_runtime_dir_at(root_fd, stage_name)
+        try:
+            _rename_noreplace_at(root_fd, name, stage_fd, "entry")
+        except FileNotFoundError:
+            return "missing", None
+
+        try:
+            moved_mode = os.stat("entry", dir_fd=stage_fd, follow_symlinks=False).st_mode
+        except FileNotFoundError:
+            return "preserved", str(root / stage_name)
+        if not stat.S_ISLNK(moved_mode):
+            try:
+                _rename_noreplace_at(stage_fd, "entry", root_fd, name)
+                return "preserved", str(root / name)
+            except OSError:
+                return "preserved", str(root / stage_name / "entry")
+
+        target = os.readlink("entry", dir_fd=stage_fd)
+        if expected_target is not None and target != expected_target:
+            try:
+                _rename_noreplace_at(stage_fd, "entry", root_fd, name)
+                return "changed", target
+            except OSError:
+                return "preserved", str(root / stage_name / "entry")
+
+        os.unlink("entry", dir_fd=stage_fd)
+        return "removed", target
+    finally:
+        if stage_fd is not None:
+            # Do not remove a replacement staging directory: only remove the
+            # exact directory held by this operation after its entry is gone.
+            if (stage_name is not None and root_fd is not None
+                    and _journal_matches(root_fd, stage_name, stage_fd)
+                    and not _entry_present(stage_fd, "entry")):
+                try:
+                    os.rmdir(stage_name, dir_fd=root_fd)
+                except OSError:
+                    pass
+            os.close(stage_fd)
+        if root_fd is not None:
+            os.close(root_fd)
+
+
 def _park_slot_noreplace(root_fd, skill, journal_fd, mount_name="mount"):
     """Park `skill` in an anchored journal, returning (raw_target, occupied)."""
     _rename_noreplace_at(root_fd, skill, journal_fd, mount_name)
@@ -411,8 +481,17 @@ def link_one(roots, name, path, quiet=False):
             cur = os.readlink(dst)
             if cur.rstrip("/") == target.rstrip("/"):
                 continue
-            dst.unlink()
-            dst.symlink_to(path)
+            state, preserved = _remove_slot_symlink(root, name)
+            if state != "removed":
+                if not quiet:
+                    print(f"skip {rname}/{name}: entry changed while relinking; preserved at {preserved}")
+                continue
+            try:
+                dst.symlink_to(path)
+            except FileExistsError:
+                if not quiet:
+                    print(f"skip {rname}/{name}: entry appeared while relinking")
+                continue
             relinked += 1
             if not quiet:
                 # show the replaced target — surfaces an adopted foreign/drifted link
@@ -471,10 +550,13 @@ def prune_dangling(roots, sources, quiet=False):
                     if not quiet:
                         print(f"keep {rname}/{link.name}: source absent, not pruned (transient)")
                     continue
-                if not quiet:
-                    print(f"pruned {rname}/{link.name} (dangling -> {target})")
-                link.unlink()
-                cleaned += 1
+                state, captured = _remove_slot_symlink(root, link.name, target)
+                if state == "removed":
+                    cleaned += 1
+                    if not quiet:
+                        print(f"pruned {rname}/{link.name} (dangling -> {target})")
+                elif not quiet:
+                    print(f"keep {rname}/{link.name}: entry changed while pruning; preserved at {captured}")
     return cleaned
 
 
@@ -946,9 +1028,12 @@ def cmd_rm(roots, skill):
     for rname, root in roots.items():
         dst = root / skill
         if dst.is_symlink():
-            dst.unlink()
-            print(f"unlinked {rname}/{skill}")
-            n += 1
+            state, preserved = _remove_slot_symlink(root, skill)
+            if state == "removed":
+                print(f"unlinked {rname}/{skill}")
+                n += 1
+            elif state == "preserved":
+                print(f"kept {rname}/{skill}: entry changed during removal; preserved at {preserved}")
     if not n:
         print(f"{skill}: no symlinks found in configured runtime slots")
 
