@@ -2,10 +2,10 @@
 
 # Skillbox
 
-**One skill folder. All your coding tools.**
+**One skill folder. Every tool.**
 
-Edit a skill once. Skillbox links that source folder into the skill directories
-used by Claude Code, Codex, and Cursor. Each tool reads the same files.
+Link your skills into Claude Code, Codex, and Cursor. Edit the source once.
+Each tool reads the same files.
 
 ![An actual Skillbox demo linking one skill into two temporary tool folders](docs/skillbox-demo.png)
 
