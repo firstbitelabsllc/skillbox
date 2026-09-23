@@ -4,6 +4,35 @@
 cd "$(dirname "$0")"
 fail=0 ran=0
 
+# The suite needs stdlib tomllib (Python 3.11+). A user-site tomli is not
+# enough: tests run skillbox under a sandboxed HOME, where it disappears.
+# Use python3 when it qualifies, so a CI or venv interpreter is what gets
+# tested; else try python3.12, then python3.11.
+# Shell tests call `python3` by name, so the chosen interpreter is placed
+# first on PATH under that name.
+pick_python() {
+  local c bin
+  for c in python3 python3.12 python3.11; do
+    bin=$(command -v "$c" 2>/dev/null) || continue
+    if "$bin" -c 'import tomllib' 2>/dev/null; then
+      printf '%s\n' "$bin"
+      return 0
+    fi
+  done
+  return 1
+}
+
+PY=$(pick_python) || {
+  echo 'skillbox tests need Python 3.11+ (stdlib tomllib) as python3, python3.12 or python3.11' >&2
+  exit 1
+}
+printf 'python3 -> %s (%s)\n' "$PY" "$("$PY" -c 'import sys; print(sys.version.split()[0])')"
+
+shim=$(mktemp -d)
+ln -s "$PY" "$shim/python3"
+export PATH="$shim:$PATH"
+trap 'rm -rf "$shim"' EXIT
+
 for t in test_*.sh; do
   [ "$t" = "run_all.sh" ] && continue
   printf '\n════════ %s ════════\n' "$t"
