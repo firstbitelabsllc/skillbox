@@ -10,7 +10,20 @@ SKILLBOX_BIN="${SKILLBOX_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd
 sb_skillbox() { python3 "$SKILLBOX_BIN" "$@"; }
 
 _sb_commit() { git -C "$1" -c user.email=t@t -c user.name=t -c commit.gpgsign=false commit -q "${@:2}"; }
-_sb_initrepo() { git -C "$1" init -q -b main && git -C "$1" add -A && _sb_commit "$1" -m init; }
+_sb_initrepo() {
+  local repo="$1"
+  local name="$(basename "$repo")"
+  local remote="$SB_TMP/remotes/${name}.git"
+  git -C "$repo" init -q -b main
+  git -C "$repo" add -A
+  _sb_commit "$repo" --allow-empty -m init
+  # Every Git-backed fixture is a canonical clone: an explicit local bare
+  # upstream keeps the --no-pull preflight green without network access.
+  mkdir -p "$(dirname "$remote")"
+  git init --bare -q "$remote"
+  git -C "$repo" remote add origin "$remote"
+  git -C "$repo" push -q -u origin main
+}
 
 _sb_mkskill() { # skills_dir name [description]
   local dir="$1/$2"

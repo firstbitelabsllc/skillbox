@@ -1368,13 +1368,28 @@ def cmd_update(sources, dry):
 def cmd_sync(roots, sources, no_pull=False):
     if not no_pull and cmd_update(sources, dry=False):
         sys.exit("sync refused: one or more source updates failed")
+
+    def unsafe_source_health():
+        return [
+            (kind, where) for kind, where, _detail in source_git_problems(sources)
+            if kind != "SOURCE-NOT-GIT"
+        ]
+
+    source_problems = unsafe_source_health()
+    if source_problems:
+        summary = ", ".join(f"{kind} {where}" for kind, where in source_problems)
+        sys.exit(f"sync refused: source health: {summary}")
+    plan, _ = resolve_plan(sources)
+    targets = {name: checked_source_roots(roots, src, name)
+               for name, (src, _) in plan.items()}
+    source_problems = unsafe_source_health()
+    if source_problems:
+        summary = ", ".join(f"{kind} {where}" for kind, where in source_problems)
+        sys.exit(f"sync refused: source health changed: {summary}")
     recovered, recovery_problems = migrate_legacy_recovery_journals(roots)
     if recovery_problems:
         sys.exit("sync refused: legacy recovery journal(s) remain under active runtime root(s): "
                  + "; ".join(recovery_problems))
-    plan, _ = resolve_plan(sources)
-    targets = {name: checked_source_roots(roots, src, name)
-               for name, (src, _) in plan.items()}
     linked = relinked = 0
     for name, (src, path) in plan.items():
         l, r = link_one(targets[name], name, path, quiet=True)
