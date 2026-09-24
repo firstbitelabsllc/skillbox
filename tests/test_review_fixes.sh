@@ -23,8 +23,9 @@ echo "sandbox: $SB_TMP"
 sb_ok "add solo (single-skill source)" sb_skillbox add solo
 mv "$SB_TMP/src/solo" "$SB_TMP/src/solo.away"
 out="$(sb_skillbox sync --no-pull 2>&1)"
-sb_contains "sync reports the absent source as not pruned" "$out" "pruned=0"
-sb_ok "solo link survives sync while its repo is absent" test -L "$SB_TMP/roots/claude/solo"
+sb_contains "sync refuses the absent Git source" "$out" "SOURCE-MISSING"
+sb_fails "sync exits nonzero while the Git source is absent" sb_skillbox sync --no-pull
+sb_ok "solo link survives refused sync while its repo is absent" test -L "$SB_TMP/roots/claude/solo"
 sb_fails "doctor is not clean while the solo mount is broken" sb_skillbox doctor
 mv "$SB_TMP/src/solo.away" "$SB_TMP/src/solo"
 sb_ok "doctor is clean once the source is back" sb_skillbox doctor
@@ -32,6 +33,24 @@ sb_ok "doctor is clean once the source is back" sb_skillbox doctor
 ln -s "../../src/team/skills/zeta" "$SB_TMP/roots/claude/zeta"
 sb_ok "sync exits 0 with a relative dangling link" sb_skillbox sync --no-pull
 sb_ok "relative dangling link into a present source is pruned" test ! -L "$SB_TMP/roots/claude/zeta"
+
+# A clean-but-ahead canonical source is also unsafe for a local merge.  Plant
+# both a wrong configured-slot link and a dangling unmanaged link, then prove
+# the preflight refuses before either relink or prune can mutate the roots.
+FOREIGN_ALPHA="$SB_TMP/foreign/alpha"
+mkdir -p "$FOREIGN_ALPHA"
+ln -sfn "$FOREIGN_ALPHA" "$SB_TMP/roots/claude/alpha"
+ln -s "../../src/team/skills/missing-ahead" "$SB_TMP/roots/claude/missing-ahead"
+printf 'ahead-only\n' >> "$SB_TMP/src/team/skills/alpha/SKILL.md"
+git -C "$SB_TMP/src/team" add skills/alpha/SKILL.md
+_sb_commit "$SB_TMP/src/team" -m fixture-ahead
+AHEAD_OUT="$(sb_skillbox sync --no-pull 2>&1)"; AHEAD_RC=$?
+sb_eq "clean-ahead source refuses sync" "$AHEAD_RC" "1"
+sb_contains "clean-ahead refusal names SOURCE-AHEAD" "$AHEAD_OUT" "SOURCE-AHEAD"
+sb_link "clean-ahead refusal leaves wrong alpha slot unchanged" \
+  "$SB_TMP/roots/claude/alpha" "$FOREIGN_ALPHA"
+sb_ok "clean-ahead refusal leaves dangling link for zero prune" \
+  test -L "$SB_TMP/roots/claude/missing-ahead"
 
 # ── 2. source add stores an absolute path ────────────────────────────────────
 mkdir -p "$SB_TMP/relsrc/skills"

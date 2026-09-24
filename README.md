@@ -78,6 +78,10 @@ skillbox doctor
 Read the source before mounting it. Skillbox checks links and source health;
 it does not vet what a skill tells an agent to do. Existing real folders are
 preserved, but symlinks in configured skill slots may be replaced.
+`sync --no-pull` checks declared Git source health before changing links; if a
+clone has uncommitted work or differs from its upstream, reconcile it first.
+Plain non-Git folders still work for this local setup; `doctor --strict` is the
+clean, branch-backed production check.
 
 ## Everyday commands
 

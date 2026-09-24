@@ -34,12 +34,22 @@ sb_ok    "not moved into the target source"    test ! -e "$SB_TMP/src/team/skill
 # ── 4. prune: a TRANSIENTLY-absent source is kept; a genuinely-dead leaf is pruned ──
 sb_ok "add alpha (from team)" sb_skillbox add alpha
 mv "$SB_TMP/src/team" "$SB_TMP/src/team.away"          # whole source blinks out
-sb_skillbox sync --no-pull >/dev/null 2>&1
+TRANSIENT_OUT="$(sb_skillbox sync --no-pull 2>&1)"; TRANSIENT_RC=$?
+sb_eq "sync refuses missing source before pruning" "$TRANSIENT_RC" "1"
+sb_contains "missing-source refusal names SOURCE-MISSING" "$TRANSIENT_OUT" "SOURCE-MISSING"
 sb_eq "alpha link SURVIVES a transient source outage" \
   "$([ -L "$SB_TMP/roots/claude/alpha" ] && echo linked || echo gone)" "linked"
 mv "$SB_TMP/src/team.away" "$SB_TMP/src/team"           # source comes back
 rm -rf "$SB_TMP/src/team/skills/alpha"                  # now the leaf is genuinely deleted
-sb_skillbox sync --no-pull >/dev/null 2>&1
+DIRTY_OUT="$(sb_skillbox sync --no-pull 2>&1)"; DIRTY_RC=$?
+sb_eq "sync refuses dirty source before pruning deleted leaf" "$DIRTY_RC" "1"
+sb_contains "dirty-source refusal names SOURCE-DIRTY" "$DIRTY_OUT" "SOURCE-DIRTY"
+sb_eq "dirty-source refusal leaves alpha link unchanged" \
+  "$([ -L "$SB_TMP/roots/claude/alpha" ] && echo linked || echo gone)" "linked"
+git -C "$SB_TMP/src/team" add -A
+_sb_commit "$SB_TMP/src/team" -m fixture-remove-alpha
+git -C "$SB_TMP/src/team" push -q
+sb_ok "clean source sync prunes genuinely-dead leaf" sb_skillbox sync --no-pull
 sb_eq "alpha link pruned once the leaf is truly gone" \
   "$([ -L "$SB_TMP/roots/claude/alpha" ] && echo linked || echo gone)" "gone"
 
