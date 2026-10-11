@@ -83,6 +83,16 @@ sb_eq "orphanx flagged UNMANAGED" \
   "$(printf '%s' "$um" | python3 -c 'import sys,json;print(sum(1 for p in json.load(sys.stdin)["problems"] if p["kind"]=="UNMANAGED" and p["where"]=="orphanx"))')" "1"
 sb_eq "UNMANAGED is non-blocking (doctor exits 0)" "$(sb_skillbox doctor >/dev/null 2>&1; echo $?)" "0"
 
+# 11b. A link declared external is owned by another installer: not UNMANAGED.
+sed -i.bak '1i\
+external = ["orphanx"]
+' "$SKILLBOX_MANIFEST" && rm -f "$SKILLBOX_MANIFEST.bak"
+ext="$(sb_skillbox doctor --json --strict)"
+sb_eq "external orphanx is not flagged UNMANAGED" \
+  "$(printf '%s' "$ext" | python3 -c 'import sys,json;print(sum(1 for p in json.load(sys.stdin)["problems"] if p["kind"]=="UNMANAGED" and p["where"]=="orphanx"))')" "0"
+sb_eq "external orphanx link left in place" "$([ -L "$SB_TMP/roots/claude/orphanx" ] && echo present || echo gone)" "present"
+sed -i.bak '1d' "$SKILLBOX_MANIFEST" && rm -f "$SKILLBOX_MANIFEST.bak"
+
 # 12. Dot-prefixed runtime helper symlinks are infrastructure, not skills.
 before_dot_count="$(printf '%s' "$um" | python3 -c 'import sys,json;print(json.load(sys.stdin)["skills_installed"])')"
 mkdir -p "$SB_TMP/system-helper"

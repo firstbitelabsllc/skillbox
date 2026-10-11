@@ -6,6 +6,10 @@
 # Roots: one per agent runtime. Codex reads ~/.agents/skills (canonical);
 # ~/.codex/skills is kept only for Cursor-compat / legacy and is NOT scanned by Codex.
 
+# Links another installer owns (a native plugin manager, for example). Doctor
+# stops reporting them as UNMANAGED; skillbox never mounts them. Must sit above [roots].
+# external = ["remote"]
+
 [roots]
 claude = "~/.claude/skills"
 agents = "~/.agents/skills"

@@ -141,6 +141,17 @@ def load():
     return roots, sources
 
 
+def external_names():
+    """Root links another installer owns (top-level `external = [...]`)."""
+    try:
+        names = _load_manifest().get("external", [])
+    except (OSError, tomllib.TOMLDecodeError):
+        return frozenset()
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        sys.exit(f"malformed manifest {MANIFEST}: external must be an array of skill names")
+    return frozenset(require_name(n) for n in names)
+
+
 def source_skills(src):
     excluded = src.get("exclude", frozenset())
     if src["single_skill"]:
@@ -1602,10 +1613,11 @@ def doctor_problems(roots, sources):
     # EVERY root is symlinked nowhere (absent from `installed`) and would slip by
     # unreported. MISSING stays guarded on is_installed so an available-but-
     # uninstalled skill is not falsely flagged as missing.
+    external = external_names()
     for name in sorted(set(installed) | set(plan)):
         winner = plan.get(name)
         is_installed = name in installed
-        if is_installed and not winner:
+        if is_installed and not winner and name not in external:
             # installed (symlinked somewhere) but no source repo owns it — informational,
             # not a blocked mount. A real local dir here is the skill's home, not an obstacle.
             problems.append(("UNMANAGED", name, "installed but no source repo owns it"))
