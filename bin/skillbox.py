@@ -131,6 +131,8 @@ def load():
                 "hosts": frozenset(hosts),
             })
         sources.sort(key=lambda s: s["priority"])
+        global _EXTERNAL  # one validated snapshot per run; never re-read mid-command
+        _EXTERNAL = _parse_external(m.get("external", []))
     except ((tomllib.TOMLDecodeError if tomllib else ValueError), json.JSONDecodeError) as e:
         sys.exit(f"malformed manifest {MANIFEST}: {e}")
     except KeyError:
@@ -139,6 +141,20 @@ def load():
         sys.exit(f"malformed manifest {MANIFEST}: [roots] and each [sources.*] must be "
                  "tables with string paths + numeric priorities — see skills.toml.example")
     return roots, sources
+
+
+_EXTERNAL = frozenset()
+
+
+def _parse_external(names):
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        raise TypeError("external must be an array of skill names")
+    return frozenset(require_name(n) for n in names)
+
+
+def external_names():
+    """Root links another installer owns (top-level `external = [...]`)."""
+    return _EXTERNAL
 
 
 def source_skills(src):
@@ -182,9 +198,12 @@ def resolve_plan(sources):
     First-wins: earlier source in precedence order wins a name collision; a lower
     source can still contribute a name no higher source defines."""
     plan, collisions = {}, {}
+    external = external_names()
     for src in sources:  # already sorted by priority
         for name, path in source_skills(src).items():
             collisions.setdefault(name, []).append(src["id"])
+            if name in external:  # another installer owns this link; never mount over it
+                continue
             if name not in plan:
                 plan[name] = (src, path)
     collisions = {n: owners for n, owners in collisions.items() if len(owners) > 1}
@@ -557,6 +576,10 @@ def prune_dangling(roots, sources, quiet=False):
             continue
         for link in sorted(root.iterdir()):
             if link.is_symlink() and not link.exists():
+                if link.name in external_names():
+                    if not quiet:
+                        print(f"keep {rname}/{link.name}: owned by another installer")
+                    continue
                 target = os.readlink(link)
                 # Runtime roots are shared with other tools. Never unlink an
                 # unknown dangling symlink just because it happens to live
@@ -1602,10 +1625,11 @@ def doctor_problems(roots, sources):
     # EVERY root is symlinked nowhere (absent from `installed`) and would slip by
     # unreported. MISSING stays guarded on is_installed so an available-but-
     # uninstalled skill is not falsely flagged as missing.
+    external = external_names()
     for name in sorted(set(installed) | set(plan)):
         winner = plan.get(name)
         is_installed = name in installed
-        if is_installed and not winner:
+        if is_installed and not winner and name not in external:
             # installed (symlinked somewhere) but no source repo owns it — informational,
             # not a blocked mount. A real local dir here is the skill's home, not an obstacle.
             problems.append(("UNMANAGED", name, "installed but no source repo owns it"))
@@ -1635,7 +1659,7 @@ def doctor_problems(roots, sources):
     for name, owners in sorted(collisions.items()):
         problems.append(("SHADOWED", name, f"{owners[0]} wins; shadowed: {owners[1:]}"))
     parity = {}
-    for name in sorted(installed):
+    for name in sorted(installed - external):
         hashes = {}
         for rname, root in roots.items():
             link = root / name
