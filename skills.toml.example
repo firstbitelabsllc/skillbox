@@ -7,7 +7,8 @@
 # ~/.codex/skills is kept only for Cursor-compat / legacy and is NOT scanned by Codex.
 
 # Links another installer owns (a native plugin manager, for example). Doctor
-# stops reporting them as UNMANAGED; skillbox never mounts them. Must sit above [roots].
+# stops reporting them, and sync never mounts over them even when a source ships
+# the same name. Must sit above [roots].
 # external = ["remote"]
 
 [roots]

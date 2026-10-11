@@ -131,6 +131,7 @@ def load():
                 "hosts": frozenset(hosts),
             })
         sources.sort(key=lambda s: s["priority"])
+        external_names()  # fail closed on a malformed declaration for every command
     except ((tomllib.TOMLDecodeError if tomllib else ValueError), json.JSONDecodeError) as e:
         sys.exit(f"malformed manifest {MANIFEST}: {e}")
     except KeyError:
@@ -193,8 +194,11 @@ def resolve_plan(sources):
     First-wins: earlier source in precedence order wins a name collision; a lower
     source can still contribute a name no higher source defines."""
     plan, collisions = {}, {}
+    external = external_names()
     for src in sources:  # already sorted by priority
         for name, path in source_skills(src).items():
+            if name in external:  # another installer owns this link; never mount over it
+                continue
             collisions.setdefault(name, []).append(src["id"])
             if name not in plan:
                 plan[name] = (src, path)
@@ -1647,7 +1651,7 @@ def doctor_problems(roots, sources):
     for name, owners in sorted(collisions.items()):
         problems.append(("SHADOWED", name, f"{owners[0]} wins; shadowed: {owners[1:]}"))
     parity = {}
-    for name in sorted(installed):
+    for name in sorted(installed - external):
         hashes = {}
         for rname, root in roots.items():
             link = root / name
