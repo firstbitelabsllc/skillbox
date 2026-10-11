@@ -103,6 +103,9 @@ sb_link "sync leaves the external alpha link alone" "$SB_TMP/roots/claude/alpha"
 ext2="$(sb_skillbox doctor --json --strict)"
 sb_eq "external alpha is not reported" \
   "$(printf '%s' "$ext2" | python3 -c 'import sys,json;print(sum(1 for p in json.load(sys.stdin)["problems"] if p["where"].endswith("alpha")))')" "0"
+rm "$SB_TMP/roots/claude/alpha" && ln -s "$SB_TMP/src/team/skills/ghost" "$SB_TMP/roots/claude/alpha"
+sb_ok "sync succeeds with a dangling external link" sb_skillbox sync --no-pull
+sb_eq "sync does not prune a dangling external link" "$([ -L "$SB_TMP/roots/claude/alpha" ] && echo present || echo gone)" "present"
 sed -i.bak '1s/.*/external = "alpha"/' "$SKILLBOX_MANIFEST" && rm -f "$SKILLBOX_MANIFEST.bak"
 sb_eq "malformed external refuses sync" "$(sb_skillbox sync --no-pull >/dev/null 2>&1; echo $?)" "1"
 sed -i.bak '1d' "$SKILLBOX_MANIFEST" && rm -f "$SKILLBOX_MANIFEST.bak"
