@@ -553,6 +553,74 @@ class SkillboxWorld(unittest.TestCase):
         link_one.assert_not_called()
         prune_dangling.assert_not_called()
 
+    def test_sync_no_pull_refuses_git_source_defects_before_any_mount_mutation(self):
+        kinds = (
+            "SOURCE-MISSING", "SOURCE-DIRTY", "SOURCE-DETACHED",
+            "SOURCE-WORKTREE", "SOURCE-NO-UPSTREAM", "SOURCE-AHEAD",
+            "SOURCE-BEHIND", "SOURCE-DIVERGED",
+        )
+        for kind in kinds:
+            with self.subTest(kind=kind), \
+                 patch.object(sb, "source_git_problems", return_value=[(kind, "delta", "fixture")]), \
+                 patch.object(sb, "migrate_legacy_recovery_journals", return_value=([], [])) as recover, \
+                 patch.object(sb, "link_one", return_value=(0, 0)) as link_one, \
+                 patch.object(sb, "prune_dangling", return_value=0) as prune_dangling:
+                with self.assertRaisesRegex(SystemExit, kind):
+                    sb.cmd_sync(self.roots, self.sources, no_pull=True)
+                recover.assert_not_called()
+                link_one.assert_not_called()
+                prune_dangling.assert_not_called()
+
+    def test_sync_no_pull_refuses_clean_ahead_without_relinking(self):
+        repo, skills, source, _remote = self._tracked_git_source()
+        link = self.roots["claude"] / "delta"
+        old_target = self.team_dir / "alpha"
+        link.symlink_to(old_target)
+        (skills / "delta" / "SKILL.md").write_text("local committed change\n")
+        self._git(repo, "add", "skills/delta/SKILL.md")
+        self._git(repo, "commit", "-m", "ahead")
+
+        with self.assertRaisesRegex(SystemExit, "SOURCE-AHEAD"):
+            sb.cmd_sync(self.roots, source, no_pull=True)
+        self.assertEqual(os.readlink(link), str(old_target))
+
+    def test_sync_no_pull_refuses_clean_no_upstream_without_relinking(self):
+        _repo, _skills, source = self._git_source()
+        link = self.roots["claude"] / "delta"
+        old_target = self.team_dir / "alpha"
+        link.symlink_to(old_target)
+
+        with self.assertRaisesRegex(SystemExit, "SOURCE-NO-UPSTREAM"):
+            sb.cmd_sync(self.roots, source, no_pull=True)
+        self.assertEqual(os.readlink(link), str(old_target))
+
+    def test_sync_no_pull_rechecks_a_source_changed_during_plan_resolution(self):
+        _repo, skills, source, _remote = self._tracked_git_source()
+        link = self.roots["claude"] / "delta"
+        old_target = self.team_dir / "alpha"
+        link.symlink_to(old_target)
+        resolve_plan = sb.resolve_plan
+
+        def dirty_after_first_check(sources):
+            plan = resolve_plan(sources)
+            (skills / "delta" / "SKILL.md").write_text("changed during sync\n")
+            return plan
+
+        with patch.object(sb, "resolve_plan", side_effect=dirty_after_first_check), \
+             patch.object(sb, "migrate_legacy_recovery_journals", return_value=([], [])) as recover, \
+             patch.object(sb, "link_one", return_value=(0, 0)) as link_one, \
+             patch.object(sb, "prune_dangling", return_value=0) as prune_dangling:
+            with self.assertRaisesRegex(SystemExit, "source health changed: SOURCE-DIRTY"):
+                sb.cmd_sync(self.roots, source, no_pull=True)
+            recover.assert_not_called()
+            link_one.assert_not_called()
+            prune_dangling.assert_not_called()
+        self.assertEqual(os.readlink(link), str(old_target))
+
+    def test_sync_no_pull_keeps_plain_folder_demo(self):
+        sb.cmd_sync(self.roots, self.sources, no_pull=True)
+        self.assertEqual((self.roots["claude"] / "alpha").resolve(), self.team_dir / "alpha")
+
     def test_doctor_refuses_a_detached_git_source(self):
         repo, _skills, source, _remote = self._tracked_git_source()
         self._git(repo, "checkout", "--detach", "HEAD")

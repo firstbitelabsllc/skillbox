@@ -79,14 +79,20 @@ sb_run "(b) doctor with nonexistent source path" doctor --json
 sb_eq "(b) nonexistent source does not make doctor blocking" \
   "$(printf '%s' "$SB_OUT" | python3 -c 'import sys,json;print(json.load(sys.stdin)["blocking"])')" "0"
 sb_run "(b) sync with nonexistent source path" sync
-sb_eq "(b) sync survives nonexistent source (exit 0)" "$SB_RC" "0"
-# sync's git-pull leg classifies a non-on-disk source as 'not a git repo, skipped'.
-sb_contains "(b) sync reports ghost source as skipped, not fatal" "$SB_OUT" "ghost: not a git repo, skipped"
+sb_eq "(b) sync refuses nonexistent Git source (exit 1)" "$SB_RC" "1"
+sb_contains "(b) sync reports missing ghost source before mutation" "$SB_OUT" "SOURCE-MISSING"
+# The baseline mounts remain untouched when preflight refuses the source set.
+sb_ok "(b) existing alpha link survives refused sync" test -L "$SB_TMP/roots/claude/alpha"
+# The missing-source case is complete; remove that temporary manifest entry so
+# later sections can isolate their own source/root boundary.
+perl -0pi -e 's/\n\[sources\.ghost\]\npath = "[^"]+"\npriority = 6\n//' "$SKILLBOX_MANIFEST"
 
 # ── (c) a dir without SKILL.md is NOT treated as a skill ─────────────────────
 mkdir -p "$SB_TMP/src/team/skills/notaskill"
 printf 'just a readme, no SKILL.md here\n' > "$SB_TMP/src/team/skills/notaskill/README.md"
 sb_run "(c) sync ignores SKILL.md-less dir" sync
+sb_eq "(c) dirty source refuses sync before relinking" "$SB_RC" "1"
+sb_contains "(c) dirty-source refusal names SOURCE-DIRTY" "$SB_OUT" "SOURCE-DIRTY"
 sb_run "(c) list after sync (notaskill must be absent)" list
 case "$SB_OUT" in
   *"notaskill"*) _sb_fail "(c) dir without SKILL.md was treated as a skill" ;;
@@ -99,6 +105,11 @@ esac
 sb_run "(c) add notaskill is refused" add notaskill
 sb_eq "(c) add of a non-skill dir exits nonzero" "$SB_RC" "1"
 sb_contains "(c) add reports not-found for the non-skill dir" "$SB_OUT" "not found: notaskill"
+# The fixture itself is now a committed canonical source again, so the later
+# missing-root checks exercise the root boundary rather than source preflight.
+git -C "$SB_TMP/src/team" add skills/notaskill/README.md
+_sb_commit "$SB_TMP/src/team" -m fixture-not-a-skill
+git -C "$SB_TMP/src/team" push -q
 
 # ── (d) a real file in a skill-name slot is left untouched (refuse-to-clobber) ─
 # Park a REAL regular file at claude/alpha. `alpha` is a genuine team skill, so add/sync

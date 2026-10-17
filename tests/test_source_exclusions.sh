@@ -72,6 +72,9 @@ sb_setup
 TEAM_SKILLS="$SB_TMP/src/team/skills"
 PRIVATE_SKILLS="$SB_TMP/src/private/skills"
 _sb_mkskill "$PRIVATE_SKILLS" beta "private beta must block retirement"
+git -C "$SB_TMP/src/private" add -A
+_sb_commit "$SB_TMP/src/private" -m fixture-private-beta
+git -C "$SB_TMP/src/private" push -q
 sb_ok "second baseline sync mounts team beta" sb_skillbox sync --no-pull
 perl -0pi -e 's/(\[sources\.team\]\npath = "[^"]+"\npriority = 1\n)/$1exclude = ["beta"]\n/' \
   "$SKILLBOX_MANIFEST"
