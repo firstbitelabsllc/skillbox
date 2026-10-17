@@ -135,5 +135,4 @@ continues to check every root for an excluded source's old mounts.
 
 ## Related tools
 
-- [Shadow](https://github.com/firstbitelabsllc/shadow) — one durable plan, atomic claims, and proof-gated completion for the AI coding agents whose skills Skillbox mounts.
 - [Claudux](https://github.com/firstbitelabsllc/claudux) — keeps a VitePress docs site current as the code changes, using your own Claude or Codex CLI.

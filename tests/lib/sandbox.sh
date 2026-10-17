@@ -78,17 +78,6 @@ single_skill = "solo"
 EOF
 }
 
-# Make a throwaway "remote" git repo with skills, usable as a clone source.
-sb_make_remote() { # name skill1 skill2...
-  local name="$1"; shift
-  local repo="$SB_TMP/remotes/$name"
-  mkdir -p "$repo/skills"
-  local s
-  for s in "$@"; do _sb_mkskill "$repo/skills" "$s"; done
-  _sb_initrepo "$repo"
-  echo "$repo"
-}
-
 sb_teardown() { [ -n "${SB_TMP:-}" ] && rm -rf "$SB_TMP"; }
 
 # ── assertions ──────────────────────────────────────────────────────────────

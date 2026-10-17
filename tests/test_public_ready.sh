@@ -11,7 +11,7 @@ while IFS= read -r -d '' file; do
   case "$file" in
     tests/test_public_ready.sh) continue ;;
   esac
-  # text-ish files only, mirroring the takeoff gate
+  # text-ish files only
   case "$file" in
     *.py|*.md|*.sh|*.txt|*.toml|*.json|*.yaml|*.yml|*.zsh|*.bash|*.js|*.ts|*.html|*.css) ;;
     *) continue ;;
