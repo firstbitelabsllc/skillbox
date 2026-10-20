@@ -1105,6 +1105,8 @@ def cmd_retire(roots, sources, skill, source_id):
     src = next((s for s in sources if s["id"] == source_id), None)
     if not src:
         sys.exit(f"unknown --source {source_id}; known: {', '.join(s['id'] for s in sources)}")
+    if skill in external_names():
+        sys.exit(f"cannot retire '{skill}': another installer owns this name")
     if skill not in src.get("exclude", frozenset()):
         sys.exit(f"cannot retire '{skill}' from {source_id}: add it to that source's exclude list first")
     expected = source_skill_path(src, skill)
@@ -1118,10 +1120,14 @@ def cmd_retire(roots, sources, skill, source_id):
 
     expected_resolved = expected.resolve()
     removable, conflicts = [], []
+    seen_roots = set()
     for rname, root in roots.items():
         if not root.is_dir():
             continue
         root_path = root.resolve(strict=False)
+        if root_path in seen_roots:
+            continue
+        seen_roots.add(root_path)
         try:
             root_fd = _open_runtime_dir(root_path)
         except OSError as error:
