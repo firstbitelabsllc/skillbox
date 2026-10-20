@@ -8,7 +8,7 @@ Commands:
   skillbox new <name> [--repo ID]    scaffold a new skill (default: your own repo) and link it everywhere
   skillbox add <name> [--source ID]  symlink an existing source skill into every runtime root
   skillbox rm <name>                 unlink named runtime-slot symlinks (source folder untouched)
-  skillbox retire <name> --source ID safely park an excluded source leaf; refuses foreign or replacement mounts
+  skillbox retire <name> --source ID safely park globally or host-excluded mounts; refuses foreign or replacement mounts
   skillbox promote <name> --to ID    move the skill to another source repo (reversible) and relink
   skillbox promote <name> --to org   emit a plugin manifest + print the DRAFT marketplace PR (never sends)
   skillbox source add <id> <path>    add a local source repo (e.g. a teammate's clone); `source rm <id>` reverses
@@ -1093,11 +1093,11 @@ def cmd_rm(roots, skill):
 
 
 def cmd_retire(roots, sources, skill, source_id):
-    """Safely park a retired source leaf outside active runtime slots.
+    """Safely park excluded source mounts outside active runtime slots.
 
     Unlike the deliberately broad `rm`, retirement proves that every parked
-    link still points to the selected source's archived leaf. It also refuses
-    if another active source would immediately take the name over on sync.
+    link still points to the selected source's leaf. It also refuses if an
+    active source can populate a retiring root on sync.
     """
     skill = require_name(skill)
     if not source_id:
@@ -1107,25 +1107,35 @@ def cmd_retire(roots, sources, skill, source_id):
         sys.exit(f"unknown --source {source_id}; known: {', '.join(s['id'] for s in sources)}")
     if skill in external_names():
         sys.exit(f"cannot retire '{skill}': another installer owns this name")
-    if skill not in src.get("exclude", frozenset()):
-        sys.exit(f"cannot retire '{skill}' from {source_id}: add it to that source's exclude list first")
     expected = source_skill_path(src, skill)
     if not expected or not (expected / "SKILL.md").is_file():
-        sys.exit(f"cannot retire '{skill}' from {source_id}: its archived source leaf is missing")
+        sys.exit(f"cannot retire '{skill}' from {source_id}: its source leaf is missing")
 
-    active_owners = [s["id"] for s in sources if skill in source_skills(s)]
+    configured = dict(zip(roots, _resolved_runtime_roots(roots)))
+    eligible = set(configured.values())
+    if skill not in src.get("exclude", frozenset()):
+        eligible -= {configured[name] for name in source_roots(roots, src)}
+    if not eligible:
+        sys.exit(f"cannot retire '{skill}' from {source_id}: no globally or host-excluded runtime roots")
+
+    active_owners = [s["id"] for s in sources if skill in source_skills(s)
+                     and any(configured[name] in eligible for name in source_roots(roots, s))]
     if active_owners:
         sys.exit(f"cannot retire '{skill}': it still resolves from active source(s) "
-                 f"{', '.join(active_owners)}; exclude or rehome those copies first")
+                 f"{', '.join(active_owners)} in the retiring roots; exclude or rehome those copies first")
+
+    def configured_roots_match():
+        try:
+            return _resolved_runtime_roots(roots) == tuple(configured.values())
+        except (OSError, RuntimeError):
+            return False
 
     expected_resolved = expected.resolve()
     removable, conflicts = [], []
     seen_roots = set()
     for rname, root in roots.items():
-        if not root.is_dir():
-            continue
-        root_path = root.resolve(strict=False)
-        if root_path in seen_roots:
+        root_path = configured[rname]
+        if root_path not in eligible or root_path in seen_roots or not root.is_dir():
             continue
         seen_roots.add(root_path)
         try:
@@ -1192,6 +1202,9 @@ def cmd_retire(roots, sources, skill, source_id):
                      "atomically park runtime slots on another filesystem: " + "; ".join(other_volume))
     try:
         for rname, root, root_path, root_fd, raw_target in removable:
+            if not configured_roots_match():
+                failure = "configured runtime roots changed before parking"
+                break
             if not _runtime_root_matches(root_path, root_fd):
                 failure = (f"runtime root for {root / skill} changed before parking; "
                            "no runtime slot was moved")
@@ -1243,6 +1256,9 @@ def cmd_retire(roots, sources, skill, source_id):
                     failure = (f"recovery journal for {root / skill} changed before parking; "
                                "no runtime slot was moved")
                     break
+                if not configured_roots_match():
+                    failure = "configured runtime roots changed before parking"
+                    break
                 try:
                     captured_raw_target, source_reoccupied = _park_slot_noreplace(
                         root_fd, skill, journal_fd
@@ -1258,6 +1274,7 @@ def cmd_retire(roots, sources, skill, source_id):
                                    "while parking; the nominal recovery path is untrusted")
                     break
 
+                roots_changed = not configured_roots_match()
                 if not _runtime_root_matches(root_path, root_fd):
                     failure = (f"{root / skill} was parked, but its runtime root changed "
                                "during retirement; the nominal recovery path is untrusted")
@@ -1308,6 +1325,10 @@ def cmd_retire(roots, sources, skill, source_id):
                         break
 
                 retained.append(archive)
+                if roots_changed or not configured_roots_match():
+                    failure = (f"configured runtime roots changed while parking {root / skill}; "
+                               f"its captured entry is preserved in {journal_name}")
+                    break
             finally:
                 if journal_fd is not None:
                     os.close(journal_fd)
@@ -1333,6 +1354,8 @@ def cmd_retire(roots, sources, skill, source_id):
             except OSError:
                 pass
 
+    if not configured_roots_match():
+        failure = failure or "configured runtime roots changed during retirement"
     if failure:
         held = "; ".join(str(archive) for archive in retained)
         suffix = f"; verified recovery retained: {held}" if held else ""

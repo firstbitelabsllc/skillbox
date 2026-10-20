@@ -123,7 +123,7 @@ sb_eq "dot helper is not counted as installed" \
 sb_eq "dot helper is not flagged unmanaged" \
   "$(printf '%s' "$dot_doc" | python3 -c 'import sys,json;print(sum(1 for p in json.load(sys.stdin)["problems"] if p["where"]==".codex-system"))')" "0"
 
-sb_ok "retire preserves external ownership and parks aliased roots once" python3 - "$SKILLBOX_BIN" <<'PY'
+sb_ok "retire preserves allowed and foreign mounts and parks excluded roots once" python3 - "$SKILLBOX_BIN" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -131,9 +131,26 @@ import subprocess
 import sys
 import tempfile
 
+
+def retire(manifest, state, home):
+    return subprocess.run(
+        [sys.executable, sys.argv[1], "retire", "alpha", "--source", "fixture"],
+        env=dict(
+            os.environ,
+            HOME=str(home),
+            SKILLBOX_MANIFEST=str(manifest),
+            SKILLBOX_STATE_DIR=str(state),
+        ),
+        capture_output=True,
+        text=True,
+    )
+
+
 for external in (True, False):
     with tempfile.TemporaryDirectory(prefix="skillbox-retire-") as temporary:
         root = Path(temporary).resolve()
+        home = root / "home"
+        home.mkdir()
         state = root / "state"
         state.mkdir(mode=0o700)
         runtime = root / "runtime"
@@ -151,18 +168,7 @@ for external in (True, False):
             + f"[roots]\ncodex = {json.dumps(str(runtime))}\ncodex-cli = {json.dumps(str(alias))}\n"
             + f'[sources.fixture]\npath = {json.dumps(str(skill.parent))}\nexclude = ["alpha"]\n'
         )
-        env = dict(
-            os.environ, SKILLBOX_MANIFEST=str(manifest), SKILLBOX_STATE_DIR=str(state)
-        )
-        command = [
-            sys.executable,
-            sys.argv[1],
-            "retire",
-            "alpha",
-            "--source",
-            "fixture",
-        ]
-        result = subprocess.run(command, env=env, capture_output=True, text=True)
+        result = retire(manifest, state, home)
         if external:
             assert (
                 result.returncode != 0 and slot.resolve() == skill and slot.is_symlink()
@@ -174,8 +180,111 @@ for external in (True, False):
             assert alias.is_symlink()
             assert len(list(state.rglob("origin.json"))) == 1
             assert os.readlink(next(state.rglob("mount"))) == str(skill)
-            assert subprocess.run(command, env=env, capture_output=True).returncode == 0
+            assert retire(manifest, state, home).returncode == 0
             assert len(list(state.rglob("origin.json"))) == 1
+
+for case in (
+    "host-only",
+    "shared-root-only",
+    "foreign-empty",
+    "foreign-absent",
+    "foreign-allowed",
+    "foreign-link",
+    "real-file",
+    "real-directory",
+    "recovery-allowed",
+    "recovery-absent",
+):
+    with tempfile.TemporaryDirectory(prefix=f"skillbox-retire-{case}-") as temporary:
+        root = Path(temporary).resolve()
+        home = root / "home"
+        home.mkdir()
+        allowed = root / "allowed"
+        runtime = root / "excluded"
+        empty = root / "empty"
+        for directory in (allowed, runtime, empty):
+            directory.mkdir()
+        allowed_alias = root / "allowed-alias"
+        allowed_alias.symlink_to(allowed)
+        excluded_alias = root / "excluded-alias"
+        excluded_alias.symlink_to(runtime)
+        state = allowed / "state" if case == "recovery-allowed" else root / "state"
+        state.mkdir(mode=0o700)
+        absent = state / "recovery" if case == "recovery-absent" else root / "absent"
+        roots = {
+            "codex": runtime,
+            "codex-cli": excluded_alias,
+            "claude": allowed,
+            "claude-cli": allowed_alias,
+            "cursor": empty,
+            "agents": absent,
+        }
+        if case == "shared-root-only":
+            roots = {"claude": allowed, "claude-cli": allowed_alias}
+        skill = root / "source/alpha"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("# alpha\n")
+        slot = runtime / "alpha"
+        allowed_slot = allowed / "alpha"
+        raw = os.path.relpath(skill, runtime)
+        allowed_raw = os.path.relpath(skill, allowed)
+        slot.symlink_to(raw)
+        allowed_slot.symlink_to(allowed_raw)
+        foreign = root / "foreign/alpha"
+        foreign.mkdir(parents=True)
+        (foreign / "SKILL.md").write_text("# foreign alpha\n")
+        conflict = empty / "alpha"
+        if case == "foreign-link":
+            conflict.symlink_to(foreign)
+        elif case == "real-file":
+            conflict.write_text("keep file\n")
+        elif case == "real-directory":
+            conflict.mkdir()
+            (conflict / "SKILL.md").write_text("keep directory\n")
+        manifest = root / "skills.toml"
+        contents = "[roots]\n" + "".join(
+            f"{name} = {json.dumps(str(path))}\n" for name, path in roots.items()
+        )
+        contents += (
+            f'[sources.fixture]\npath = {json.dumps(str(skill.parent))}\nhosts = ["claude"]\n'
+        )
+        foreign_host = {
+            "foreign-empty": "cursor",
+            "foreign-absent": "agents",
+            "foreign-allowed": "claude-cli",
+        }.get(case)
+        if foreign_host:
+            contents += (
+                f'[sources.foreign]\npath = {json.dumps(str(foreign.parent))}\n'
+                f"hosts = [{json.dumps(foreign_host)}]\n"
+            )
+        manifest.write_text(contents)
+
+        result = retire(manifest, state, home)
+        assert allowed_slot.is_symlink() and os.readlink(allowed_slot) == allowed_raw, case
+        assert allowed_alias.is_symlink() and excluded_alias.is_symlink(), case
+        assert not absent.exists(), case
+        if case in ("host-only", "foreign-allowed"):
+            assert result.returncode == 0, (case, result.stderr)
+            assert not slot.exists() and not slot.is_symlink(), case
+            journals = list(state.rglob("origin.json"))
+            assert len(journals) == 1, case
+            assert os.readlink(journals[0].parent / "raw-mount") == raw, case
+            assert (journals[0].parent / "mount").resolve() == skill, case
+            assert json.loads(journals[0].read_text())["target"] == raw, case
+            assert retire(manifest, state, home).returncode == 0, case
+            assert list(state.rglob("origin.json")) == journals, case
+            assert os.readlink(allowed_slot) == allowed_raw, case
+        else:
+            assert result.returncode != 0, (case, result.stdout)
+            assert slot.is_symlink() and os.readlink(slot) == raw, case
+            assert not list(state.rglob("origin.json")), case
+            if case == "foreign-link":
+                assert conflict.is_symlink() and os.readlink(conflict) == str(foreign)
+            elif case == "real-file":
+                assert conflict.read_text() == "keep file\n"
+            elif case == "real-directory":
+                assert (conflict / "SKILL.md").read_text() == "keep directory\n"
 PY
 
 sb_report

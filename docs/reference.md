@@ -30,7 +30,7 @@ skillbox list                       installed skills + the source repo each reso
 skillbox new <name> [--repo ID]     scaffold a new skill and link it into every runtime
 skillbox add <name> [--source ID]   link an existing source skill into every runtime
 skillbox rm <name>                  unlink any symlink in the named runtime slots; leave the source untouched
-skillbox retire <name> --source ID  safely unmount an excluded source leaf; refuses foreign/replacement links
+skillbox retire <name> --source ID  safely park globally or host-excluded mounts; refuses foreign/replacement links
 skillbox promote <name> --to ID     move a skill to another source repo and relink (reversible)
 skillbox promote <name> --to org    publish to your org's plugin marketplace (prints a DRAFT PR; never sends)
 skillbox scrub [--dry-run] [--json]   list KEEP-PRIVATE / *-leo skills that would leak on promote
@@ -69,8 +69,8 @@ To retire a compatibility alias without deleting its source folder, add an
 Excluded leaves are absent from `list`, `add`, and future sync plans, so sync
 will not recreate them. Retirement only parks slots that still point at that
 specific source leaf; it refuses names declared `external`, real files, a
-different tool's symlink, or an active lower-priority copy that would take over
-the same name. Aliased runtime roots are parked once.
+different tool's symlink, or an active copy that can populate a retiring root,
+including a root whose slot is absent. Aliased runtime roots are parked once.
 Rather than deleting a mutable runtime link, `retire` parks each accepted link
 in one private recovery root under `$SKILLBOX_STATE_DIR` (normally
 `~/.skillbox/recovery`). Skillbox refuses to use it unless it sits outside every
@@ -128,8 +128,13 @@ Set `hosts = ["cursor"]` in a source table to mount that source only in the
 list is invalid. Omit `hosts` to keep mounting in every root. Source precedence
 still elects one winner for each skill across the manifest. `add` and `sync`
 refuse existing same-name links outside that winner's target hosts, and `doctor`
-reports them as drift. Inspect and remove those links explicitly; `retire`
-continues to check every root for an excluded source's old mounts.
+reports them as drift. `skillbox retire <name> --source <id>` parks that source's
+mounts only in excluded physical roots while preserving allowed roots. An
+allowed host alias protects its shared physical root. A global `exclude` entry
+still selects every configured root. Retirement refuses observed changes to
+configured root aliases, retaining captured entries for recovery if a change
+arrives after a move. A separate process can change an alias after the final
+check; the cooperative lock only serializes normal Skillbox writers.
 
 
 
