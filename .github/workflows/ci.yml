@@ -1,10 +1,8 @@
-# Least-privilege hermetic CI for skillbox.
-# Runs the full sandbox suite on Ubuntu + macOS with Python 3.11 and 3.12
-# coverage via a compact matrix (no full OS×Python cartesian product).
 name: ci
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -22,9 +20,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Compact coverage: both supported Pythons on Ubuntu, plus macOS once
-        # (with 3.12) so OS and interpreter claims are each proven without a
-        # 2×2 duplicate matrix.
         include:
           - os: ubuntu-latest
             python-version: "3.11"
