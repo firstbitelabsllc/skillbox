@@ -123,4 +123,59 @@ sb_eq "dot helper is not counted as installed" \
 sb_eq "dot helper is not flagged unmanaged" \
   "$(printf '%s' "$dot_doc" | python3 -c 'import sys,json;print(sum(1 for p in json.load(sys.stdin)["problems"] if p["where"]==".codex-system"))')" "0"
 
+sb_ok "retire preserves external ownership and parks aliased roots once" python3 - "$SKILLBOX_BIN" <<'PY'
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+for external in (True, False):
+    with tempfile.TemporaryDirectory(prefix="skillbox-retire-") as temporary:
+        root = Path(temporary).resolve()
+        state = root / "state"
+        state.mkdir(mode=0o700)
+        runtime = root / "runtime"
+        runtime.mkdir()
+        alias = root / "alias"
+        alias.symlink_to(runtime)
+        skill = root / "source/alpha"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("# alpha\n")
+        slot = runtime / "alpha"
+        slot.symlink_to(skill)
+        manifest = root / "skills.toml"
+        manifest.write_text(
+            ('external = ["alpha"]\n' if external else "")
+            + f"[roots]\ncodex = {json.dumps(str(runtime))}\ncodex-cli = {json.dumps(str(alias))}\n"
+            + f'[sources.fixture]\npath = {json.dumps(str(skill.parent))}\nexclude = ["alpha"]\n'
+        )
+        env = dict(
+            os.environ, SKILLBOX_MANIFEST=str(manifest), SKILLBOX_STATE_DIR=str(state)
+        )
+        command = [
+            sys.executable,
+            sys.argv[1],
+            "retire",
+            "alpha",
+            "--source",
+            "fixture",
+        ]
+        result = subprocess.run(command, env=env, capture_output=True, text=True)
+        if external:
+            assert (
+                result.returncode != 0 and slot.resolve() == skill and slot.is_symlink()
+            )
+            assert not list(state.rglob("origin.json"))
+        else:
+            assert result.returncode == 0, result.stderr
+            assert not slot.exists() and not slot.is_symlink()
+            assert alias.is_symlink()
+            assert len(list(state.rglob("origin.json"))) == 1
+            assert os.readlink(next(state.rglob("mount"))) == str(skill)
+            assert subprocess.run(command, env=env, capture_output=True).returncode == 0
+            assert len(list(state.rglob("origin.json"))) == 1
+PY
+
 sb_report

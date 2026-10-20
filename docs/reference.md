@@ -68,8 +68,9 @@ To retire a compatibility alias without deleting its source folder, add an
 `skillbox retire old-alias --source <id>`, then run `skillbox sync --no-pull`.
 Excluded leaves are absent from `list`, `add`, and future sync plans, so sync
 will not recreate them. Retirement only parks slots that still point at that
-specific source leaf; it refuses real files, a different tool's symlink, or an
-active lower-priority copy that would otherwise take over the same name.
+specific source leaf; it refuses names declared `external`, real files, a
+different tool's symlink, or an active lower-priority copy that would take over
+the same name. Aliased runtime roots are parked once.
 Rather than deleting a mutable runtime link, `retire` parks each accepted link
 in one private recovery root under `$SKILLBOX_STATE_DIR` (normally
 `~/.skillbox/recovery`). Skillbox refuses to use it unless it sits outside every
