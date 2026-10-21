@@ -1,4 +1,4 @@
-<img src="docs/cover.png" width="1280" alt="Skillbox — One skill folder. Every tool.">
+<img src="docs/cover.png" width="1280" alt="Skillbox. One skill folder. Every tool.">
 
 # Skillbox
 
@@ -23,7 +23,7 @@ The useful proof is concrete: one source `SKILL.md`, links in temporary Claude
 Code and Codex skill folders, then one source edit visible through both links.
 Keep the manifest and state directory inside the example folder via
 `SKILLBOX_MANIFEST` and `SKILLBOX_STATE_DIR`; this leaves your installed skills
-and configuration untouched. Skillbox creates the links—it does not start or
+and configuration untouched. Skillbox creates the links. It does not start or
 configure either coding agent.
 
 ## Preview the linking behavior
